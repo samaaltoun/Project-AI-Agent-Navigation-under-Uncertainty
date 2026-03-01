@@ -1,6 +1,14 @@
 # Virtual environment
 .venv/
 
+.idea/
+
+# RL runs / artifacts
+runs/
+minigrid projects/runs/
+*.csv
+*.zip
+
 # Python cache
 __pycache__/
 *.pyc
@@ -14,3 +22,4 @@ __pycache__/
 
 # Jupyter
 .ipynb_checkpoints/
+
