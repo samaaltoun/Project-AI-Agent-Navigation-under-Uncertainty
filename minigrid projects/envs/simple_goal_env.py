@@ -51,7 +51,7 @@ class SimpleDoorEnv(MiniGridEnv):
         super().__init__(
             mission_space=mission_space,
             grid_size=size,
-            see_through_walls=True,
+            see_through_walls=False,
             max_steps=max_steps,
             **kwargs,
         )
