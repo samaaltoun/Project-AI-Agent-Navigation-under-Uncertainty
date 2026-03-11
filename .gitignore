@@ -25,3 +25,4 @@ __pycache__/
 # Jupyter
 .ipynb_checkpoints/
 
+minigrid projects/testings.ipynb
