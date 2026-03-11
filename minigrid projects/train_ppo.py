@@ -15,9 +15,9 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 #from envs.simple_goal_env import register_env
 from envs.simple_keydoor_env import register_env
-from minigrid.wrappers import ImgObsWrapper
+from minigrid.wrappers import ImgObsWrapper, ViewSizeWrapper
 from stable_baselines3.common.vec_env import VecTransposeImage
-from envs.wrappers import ReducedActionSpace
+from envs.wrappers import ReducedActionSpace, SensorNoiseWrapper
 
 class MiniGridCNN(BaseFeaturesExtractor):
     """
@@ -94,20 +94,20 @@ class CSVLoggerCallback(BaseCallback):
             self._dump()
 
 
-def make_env():
+def make_env(noise_prob: float = 0.0, view_size: int = 7):
     env = gym.make("SimpleKeyDoor-v0", render_mode=None)
     env = ReducedActionSpace(env)
-    env = ImgObsWrapper(env)    # <-- drops mission/direction, keeps image
-    env = Monitor(env)  # enables episode stats in infos
+    if noise_prob > 0.0:
+        env = SensorNoiseWrapper(env, noise_prob=noise_prob)
+    if view_size != 7:
+        env = ViewSizeWrapper(env, agent_view_size=view_size)
+    env = ImgObsWrapper(env)    # strips dict → keeps only image array; must be last obs wrapper
+    env = Monitor(env)
     return env
 
 
 def main():
     register_env()
-
-    run_name = time.strftime("%Y-%m-%d_%H%M%S") + "_SimpleKeyDoor_PPO"
-    run_dir = Path("runs") / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
 
     # Save config
     config = {
@@ -122,12 +122,18 @@ def main():
         "gamma": 0.99,
         "ent_coef": 0.001,
         "n_epochs": 10,
+        "noise_prob": 0.0,      # sensor noise level [0.0, 1.0]
+        "view_size": 7,         # agent field-of-view (default 7x7)
     }
+
+    run_name = time.strftime("%Y-%m-%d_%H%M%S") + f"_SimpleKeyDoor_PPO_noise{config['noise_prob']}"
+    run_dir = Path("runs") / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
 
     np.random.seed(config["seed"])
 
-    env = DummyVecEnv([make_env])
+    env = DummyVecEnv([lambda: make_env(noise_prob=config["noise_prob"], view_size=config["view_size"])])
     env = VecTransposeImage(env)  # <-- converts (H,W,C) to (C,H,W) for CnnPolicy
 
     policy_kwargs = dict(
