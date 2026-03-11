@@ -6,6 +6,8 @@
 # RL runs / artifacts
 runs/
 minigrid projects/runs/
+minigrid projects/videos/
+
 *.csv
 *.zip
 
