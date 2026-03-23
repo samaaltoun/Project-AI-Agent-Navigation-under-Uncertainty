@@ -122,7 +122,7 @@ class SimpleKeyDoorEnv(MiniGridEnv):
                 return self.door_pos
             return self.goal_pos
 
-        gamma_shaping = 0.995
+        gamma_shaping = 0.99
         k = 0.05
 
         # ----- PRE-STEP STATE (s0) -----

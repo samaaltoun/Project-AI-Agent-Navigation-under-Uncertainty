@@ -113,14 +113,14 @@ def main():
     config = {
         "env_id": "SimpleKeyDoor-v0",
         "algo": "PPO",
-        "total_timesteps": 300_000,
+        "total_timesteps": 1_000_000,
         "seed": 42,
         "policy": "CnnPolicy",  # MiniGrid obs is image-like -> use CNN
-        "n_steps": 2048,
-        "batch_size": 256,
+        "n_steps": 512,          # number of steps to run in each environment per update (i.e. batch size = n_steps * n_envs)
+        "batch_size": 256,          # number of samples per gradient update (max 512 here since we have n_envs=1)
         "learning_rate": 3e-4,
         "gamma": 0.99,
-        "ent_coef": 0.001,
+        "ent_coef": 0.05,
         "n_epochs": 10,
         "noise_prob": 0.0,      # sensor noise level [0.0, 1.0]
         "view_size": 7,         # agent field-of-view (default 7x7)
@@ -133,7 +133,8 @@ def main():
 
     np.random.seed(config["seed"])
 
-    env = DummyVecEnv([lambda: make_env(noise_prob=config["noise_prob"], view_size=config["view_size"])])
+    n_envs = 8
+    env = DummyVecEnv([lambda: make_env(noise_prob=config["noise_prob"], view_size=config["view_size"]) for _ in range(n_envs)])
     env = VecTransposeImage(env)  # <-- converts (H,W,C) to (C,H,W) for CnnPolicy
 
     policy_kwargs = dict(
