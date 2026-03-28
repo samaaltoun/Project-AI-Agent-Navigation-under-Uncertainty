@@ -27,6 +27,7 @@ class MiniGridCNN(BaseFeaturesExtractor):
 
         with th.no_grad():
             sample = th.as_tensor(observation_space.sample()[None]).float()
+            n_flatten = self.cnn(sample).shape[1]
 
         self.linear = nn.Sequential(
             nn.Linear(n_flatten, features_dim),
