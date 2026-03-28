@@ -6,8 +6,6 @@ from pathlib import Path
 import numpy as np
 import gymnasium as gym
 import torch as th
-import torch.nn as nn
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
@@ -18,38 +16,7 @@ from envs.simple_keydoor_env import register_env
 from minigrid.wrappers import ImgObsWrapper, ViewSizeWrapper
 from stable_baselines3.common.vec_env import VecTransposeImage
 from envs.wrappers import ReducedActionSpace, SensorNoiseWrapper
-
-class MiniGridCNN(BaseFeaturesExtractor):
-    """
-    Feature extractor for MiniGrid 7x7 observations.
-    Works with channel-first (C,H,W) after VecTransposeImage.
-    """
-    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 128):
-        super().__init__(observation_space, features_dim)
-
-        n_input_channels = observation_space.shape[0]  # C
-
-        self.cnn = nn.Sequential(
-            nn.Conv2d(n_input_channels, 32, kernel_size=3, stride=1, padding=1),  # 7x7 -> 7x7
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),               # 7x7 -> 4x4
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),               # 4x4 -> 2x2
-            nn.ReLU(),
-            nn.Flatten(),
-        )
-
-        with th.no_grad():
-            sample = th.as_tensor(observation_space.sample()[None]).float()
-            n_flatten = self.cnn(sample).shape[1]
-
-        self.linear = nn.Sequential(
-            nn.Linear(n_flatten, features_dim),
-            nn.ReLU(),
-        )
-
-    def forward(self, observations: th.Tensor) -> th.Tensor:
-        return self.linear(self.cnn(observations))
+from envs.extractors import MiniGridCNN
 
 
 class CSVLoggerCallback(BaseCallback):
@@ -113,7 +80,7 @@ def main():
     config = {
         "env_id": "SimpleKeyDoor-v0",
         "algo": "PPO",
-        "total_timesteps": 1_000_000,
+        "total_timesteps": 300_000,
         "seed": 42,
         "policy": "CnnPolicy",  # MiniGrid obs is image-like -> use CNN
         "n_steps": 512,          # number of steps to run in each environment per update (i.e. batch size = n_steps * n_envs)
@@ -122,7 +89,7 @@ def main():
         "gamma": 0.99,
         "ent_coef": 0.05,
         "n_epochs": 10,
-        "noise_prob": 0.0,      # sensor noise level [0.0, 1.0]
+        "noise_prob": 0.2,      # sensor noise level [0.0, 1.0]
         "view_size": 7,         # agent field-of-view (default 7x7)
     }
 

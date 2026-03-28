@@ -6,47 +6,11 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
 from minigrid.wrappers import ImgObsWrapper
 
-import torch as th
-import torch.nn as nn
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-
 from envs.simple_keydoor_env import register_env
-from envs.wrappers import ReducedActionSpace
+from envs.wrappers import ReducedActionSpace, SensorNoiseWrapper
+from envs.extractors import MiniGridCNN
 
 from gymnasium.wrappers import RecordVideo
-
-
-class MiniGridCNN(BaseFeaturesExtractor):
-    """
-    Feature extractor for MiniGrid 7x7 observations.
-    Works with channel-first (C,H,W) after VecTransposeImage.
-    """
-    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 128):
-        super().__init__(observation_space, features_dim)
-
-        n_input_channels = observation_space.shape[0]  # C
-
-        self.cnn = nn.Sequential(
-            nn.Conv2d(n_input_channels, 32, kernel_size=3, stride=1, padding=1),  # 7x7 -> 7x7
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),               # 7x7 -> 4x4
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),               # 4x4 -> 2x2
-            nn.ReLU(),
-            nn.Flatten(),
-        )
-
-        with th.no_grad():
-            sample = th.as_tensor(observation_space.sample()[None]).float()
-            n_flatten = self.cnn(sample).shape[1]
-
-        self.linear = nn.Sequential(
-            nn.Linear(n_flatten, features_dim),
-            nn.ReLU(),
-        )
-
-    def forward(self, observations: th.Tensor) -> th.Tensor:
-        return self.linear(self.cnn(observations))
 
 
 def main():
@@ -58,6 +22,7 @@ def main():
     parser.add_argument("--video", action="store_true", help="Save videos to disk")
     parser.add_argument("--video_dir", type=str, default="videos", help="Folder to save mp4 videos")
     parser.add_argument("--video_prefix", type=str, default="ppo_simplekeydoor", help="Video filename prefix")
+    parser.add_argument("--noise", type=float, default=0.0, help="Sensor noise probability (0.0 = clean)")
 
     args = parser.parse_args()
 
@@ -71,6 +36,8 @@ def main():
 
         e = gym.make("SimpleKeyDoor-v0", render_mode=render_mode)
         e = ReducedActionSpace(e)
+        if args.noise > 0.0:
+            e = SensorNoiseWrapper(e, noise_prob=args.noise)
         e = ImgObsWrapper(e)
 
         if args.video:
@@ -86,7 +53,7 @@ def main():
     env = DummyVecEnv([make_eval_env])
     env = VecTransposeImage(env)
 
-    model = PPO.load(args.model, custom_objects={})
+    model = PPO.load(args.model, env=env, custom_objects={"features_extractor_class": MiniGridCNN})
 
     ep_rewards = []
     successes = 0
