@@ -1,4 +1,7 @@
-import os
+# this file will train a PPO agent on the VariationalGoalEnv and save the model, config, and training metrics to a timestamped folder in `runs`
+# It generates a new grid layout on every episode, so the agent must learn to generalize across different maps with the same underlying structure
+
+# train_ppo_var.py
 import json
 import time
 from pathlib import Path
@@ -13,13 +16,13 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
 
-from envs.variational_goal_env import VariationalGoalEnv, register_env
+from envs.variational_goal_env import LevelConfig, VariationalGoalEnv, register_env
 from envs.wrappers import ReducedActionSpace, SensorNoiseWrapper
 from minigrid.wrappers import ImgObsWrapper, ViewSizeWrapper
 
 
 class MiniGridCNN(BaseFeaturesExtractor):
-    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 128):
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 256):
         super().__init__(observation_space, features_dim)
         n_input_channels = observation_space.shape[0]
 
@@ -51,8 +54,7 @@ class CSVLoggerCallback(BaseCallback):
         self._last_dump = time.time()
 
     def _on_step(self) -> bool:
-        infos = self.locals.get("infos", [])
-        for info in infos:
+        for info in self.locals.get("infos", []):
             if "episode" in info:
                 ep = info["episode"]
                 self.rows.append({
@@ -67,46 +69,39 @@ class CSVLoggerCallback(BaseCallback):
 
     def _dump(self):
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        header = "timesteps,ep_len,ep_rew\n"
         file_exists = self.log_path.exists()
         with self.log_path.open("a", encoding="utf-8") as f:
             if not file_exists:
-                f.write(header)
+                f.write("timesteps,ep_len,ep_rew\n")
             for r in self.rows:
                 f.write(f'{r["timesteps"]},{r["ep_len"]},{r["ep_rew"]}\n')
         self.rows.clear()
 
-    def _on_training_end(self) -> None:
+    def _on_training_end(self):
         if self.rows:
             self._dump()
 
 
 def _next_run_id(runs_dir: Path, date_str: str, env_name: str) -> str:
-    """
-    Scan the runs folder and returns the next run ID for today's date + env,
-    """
     prefix = f"{date_str}_"
     existing = [
         d.name for d in runs_dir.iterdir()
         if d.is_dir() and d.name.startswith(prefix) and env_name in d.name
     ] if runs_dir.exists() else []
-
     max_id = 0
     for name in existing:
-        # name format: 2025-01-28_143022_VariationalGoal_run001
         parts = name.rsplit("run", 1)
         if len(parts) == 2 and parts[1].isdigit():
             max_id = max(max_id, int(parts[1]))
-
     return f"run{max_id + 1:03d}"
 
 
-def make_env(grid_size: int = 10, noise_prob: float = 0.0, view_size: int = 7):
-    env = gym.make("VariationalGoal-v0", render_mode=None)
+def make_env(level: LevelConfig, noise_prob: float = 0.0, view_size: int = 11):
+    env = VariationalGoalEnv(level=level, render_mode=None)
     env = ReducedActionSpace(env)
     if noise_prob > 0.0:
         env = SensorNoiseWrapper(env, noise_prob=noise_prob)
-    if view_size != 7:
+    if view_size != 11:
         env = ViewSizeWrapper(env, agent_view_size=view_size)
     env = ImgObsWrapper(env)
     env = Monitor(env)
@@ -114,35 +109,58 @@ def make_env(grid_size: int = 10, noise_prob: float = 0.0, view_size: int = 7):
 
 
 def main():
-    register_env()
+    # ----------------------------------------------------------------
+    # Level layout — edit these to change the map
+    # ----------------------------------------------------------------
+    level = LevelConfig(
+        width=20,               # grid width  (including border walls)
+        height=16,              # grid height (including border walls)
+        num_walls=2,            # number of dividing walls (= number of room dividers)
+        doors_per_wall=1,       # locked doors (and matching keys) per wall
+        wall_orientation="vertical",  # 'vertical' | 'horizontal' | 'random'
+        min_gap=3,              # minimum room width/height in cells
+    )
 
+    # ----------------------------------------------------------------
+    # Training hyperparameters
+    # ----------------------------------------------------------------
     config = {
         "env_id": "VariationalGoal-v0",
         "algo": "PPO",
-        "total_timesteps": 2_000_000,
+        "total_timesteps": 1_000_000,
         "seed": 42,
         "policy": "CnnPolicy",
-        "n_steps": 512,
-        "batch_size": 256,
+        "n_steps": 1024,
+        "batch_size": 512,
         "learning_rate": 3e-4,
         "gamma": 0.99,
-        "ent_coef": 0.05,
+        "ent_coef": 0.2,
         "n_epochs": 10,
         "noise_prob": 0.0,
-        "view_size": 7,
-        "grid_size": 10,
+        "view_size": 11,
+        # Level config saved alongside for reference
+        "level": {
+            "width": level.width,
+            "height": level.height,
+            "num_walls": level.num_walls,
+            "doors_per_wall": level.doors_per_wall,
+            "wall_orientation": level.wall_orientation,
+            "min_gap": level.min_gap,
+        },
     }
 
-    # --- Build run folder: runs/2025-01-28_143022_VariationalGoal_run001 ---
+    register_env()
+
+    # ----------------------------------------------------------------
+    # Run folder:  runs/2025-01-28_143022_VariationalGoal_run001
+    # ----------------------------------------------------------------
     env_name = "VariationalGoal"
     runs_dir = Path("runs")
     date_str = time.strftime("%Y-%m-%d")
     time_str = time.strftime("%Y-%m-%d_%H%M%S")
     run_id = _next_run_id(runs_dir, date_str, env_name)
-    run_name = f"{time_str}_{env_name}_{run_id}"
-    run_dir = runs_dir / run_name
+    run_dir = runs_dir / f"{time_str}_{env_name}_{run_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
-
     (run_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     print(f"Run directory: {run_dir}")
 
@@ -151,18 +169,14 @@ def main():
 
     n_envs = 8
     env = DummyVecEnv([
-        lambda: make_env(
-            grid_size=config["grid_size"],
-            noise_prob=config["noise_prob"],
-            view_size=config["view_size"],
-        )
+        lambda: make_env(level=level, noise_prob=config["noise_prob"], view_size=config["view_size"])
         for _ in range(n_envs)
     ])
     env = VecTransposeImage(env)
 
     policy_kwargs = dict(
         features_extractor_class=MiniGridCNN,
-        features_extractor_kwargs=dict(features_dim=128),
+        features_extractor_kwargs=dict(features_dim=256),
     )
 
     model = PPO(
@@ -187,9 +201,9 @@ def main():
     model.learn(total_timesteps=config["total_timesteps"], callback=csv_cb)
 
     model.save(str(run_dir / "model.zip"))
-    print(f"Saved model    → {run_dir / 'model.zip'}")
-    print(f"Saved metrics  → {run_dir / 'metrics.csv'}")
-    print(f"Saved config   → {run_dir / 'config.json'}")
+    print(f"Saved model   → {run_dir / 'model.zip'}")
+    print(f"Saved metrics → {run_dir / 'metrics.csv'}")
+    print(f"Saved config  → {run_dir / 'config.json'}")
 
 
 if __name__ == "__main__":

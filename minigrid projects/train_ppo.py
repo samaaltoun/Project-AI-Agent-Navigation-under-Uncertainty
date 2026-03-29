@@ -1,3 +1,6 @@
+# original training script for PPO on the SimpleKeyDoor environment
+# uses a CNN and the later training files are similar to this base code
+
 import os
 import json
 import time
