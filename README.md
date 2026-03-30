@@ -6,7 +6,7 @@ Please follow the steps below carefully to set up your environment.
 
 ---
 
-# 🔧 1. Install Git
+#  1. Install Git
 
 ### Mac
 Open Terminal and run:
@@ -30,7 +30,7 @@ git --version
 
 ---
 
-# 📥 2. Clone the Repository
+#  2. Clone the Repository
 
 ```bash
 git clone <REPO_URL>
@@ -41,7 +41,7 @@ Make sure you are inside the project folder before continuing.
 
 ---
 
-# 🐍 3. Install Python 3.12
+# 3. Install Python 3.12
 
 This project requires **Python 3.12**.
 
@@ -64,7 +64,7 @@ https://www.python.org/downloads/
 
 ---
 
-# 🧪 4. Create Virtual Environment
+# 4. Create Virtual Environment
 
 Inside the project folder:
 
@@ -105,7 +105,7 @@ Python 3.12.x
 
 ---
 
-# 📦 6. Install Dependencies
+# 6. Install Dependencies
 
 ```bash
 pip install --upgrade pip
@@ -114,7 +114,7 @@ pip install -r requirements.txt
 
 ---
 
-# ✅ 7. Smoke Test (Verify Setup)
+# 7. Smoke Test (Verify Setup)
 
 Run this test:
 
@@ -133,7 +133,7 @@ If you see this, your setup is correct.
 
 ---
 
-# 🖥 Optional: Rendering Test
+#  Optional: Rendering Test
 
 ```bash
 python src/render_test.py
@@ -149,7 +149,7 @@ pip install pygame
 
 ---
 
-# 🔄 Daily Workflow
+#  Daily Workflow
 
 Every time you work on the project:
 
@@ -166,7 +166,7 @@ or
 
 ---
 
-# ⚠ Important Rules
+#  Important Rules
 
 - DO NOT commit `.venv/`
 - Always activate the virtual environment before running code
@@ -190,6 +190,6 @@ pip install -r requirements.txt
 
 ---
 
-# 🚀 Setup Complete
+#  Setup Complete
 
 If everything runs without errors, you are ready to start working on the project.
