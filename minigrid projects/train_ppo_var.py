@@ -16,24 +16,29 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
 
-from envs.variational_goal_env import LevelConfig, VariationalGoalEnv, register_env
+from envs.variational_goal_env import LevelConfig, VariationalGoalEnv, register_env, load_snapshot
 from envs.wrappers import ReducedActionSpace, SensorNoiseWrapper
 from minigrid.wrappers import ImgObsWrapper, ViewSizeWrapper
 
 
 class MiniGridCNN(BaseFeaturesExtractor):
-    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 256):
+    """
+    MiniGrid-optimised CNN using 2x2 kernels with stride 1 (no padding).
+    Preserves spatial information much better than stride-2 on small 7x7 inputs.
+    Source: https://minigrid.farama.org/content/training/
+    """
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 128):
         super().__init__(observation_space, features_dim)
         n_input_channels = observation_space.shape[0]
 
         self.cnn = nn.Sequential(
-            nn.Conv2d(n_input_channels, 32, 3, stride=1, padding=1),
+            nn.Conv2d(n_input_channels, 16, (2, 2)),  # 7x7 → 6x6
             nn.ReLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1),
+            nn.Conv2d(16, 32, (2, 2)),                # 6x6 → 5x5
             nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=2, padding=1),
+            nn.Conv2d(32, 64, (2, 2)),                # 5x5 → 4x4
             nn.ReLU(),
-            nn.Flatten(),
+            nn.Flatten(),                              # 64 * 4 * 4 = 1024
         )
 
         with th.no_grad():
@@ -96,12 +101,12 @@ def _next_run_id(runs_dir: Path, date_str: str, env_name: str) -> str:
     return f"run{max_id + 1:03d}"
 
 
-def make_env(level: LevelConfig, noise_prob: float = 0.0, view_size: int = 11):
-    env = VariationalGoalEnv(level=level, render_mode=None)
+def make_env(level: LevelConfig, noise_prob: float = 0.0, view_size: int = 11, snapshot=None):
+    env = VariationalGoalEnv(snapshot=snapshot, render_mode=None)
     env = ReducedActionSpace(env)
     if noise_prob > 0.0:
         env = SensorNoiseWrapper(env, noise_prob=noise_prob)
-    if view_size != 11:
+    if view_size != 7:
         env = ViewSizeWrapper(env, agent_view_size=view_size)
     env = ImgObsWrapper(env)
     env = Monitor(env)
@@ -127,17 +132,17 @@ def main():
     config = {
         "env_id": "VariationalGoal-v0",
         "algo": "PPO",
-        "total_timesteps": 1_000_000,
+        "total_timesteps": 2_000_000,
         "seed": 42,
         "policy": "CnnPolicy",
-        "n_steps": 1024,
-        "batch_size": 512,
-        "learning_rate": 3e-4,
+        "n_steps": 128,
+        "batch_size": 64,
+        "learning_rate": 9e-4,
         "gamma": 0.99,
-        "ent_coef": 0.2,
+        "ent_coef": 0.1,
         "n_epochs": 10,
         "noise_prob": 0.0,
-        "view_size": 11,
+        "view_size": 7,
         # Level config saved alongside for reference
         "level": {
             "width": level.width,
@@ -168,34 +173,48 @@ def main():
     th.manual_seed(config["seed"])
 
     n_envs = 8
+    snap = load_snapshot(Path(__file__).parent / "levels/stage2small.json")
     env = DummyVecEnv([
-        lambda: make_env(level=level, noise_prob=config["noise_prob"], view_size=config["view_size"])
+        lambda: make_env(level=level, noise_prob=config["noise_prob"], view_size=config["view_size"], snapshot=snap)
         for _ in range(n_envs)
     ])
     env = VecTransposeImage(env)
 
     policy_kwargs = dict(
         features_extractor_class=MiniGridCNN,
-        features_extractor_kwargs=dict(features_dim=256),
+        features_extractor_kwargs=dict(features_dim=128),
     )
 
-    model = PPO(
-        "CnnPolicy",
-        env,
-        verbose=1,
-        n_steps=config["n_steps"],
-        batch_size=config["batch_size"],
-        learning_rate=config["learning_rate"],
-        gamma=config["gamma"],
-        seed=config["seed"],
-        gae_lambda=0.95,
-        ent_coef=config["ent_coef"],
-        clip_range=0.2,
-        n_epochs=config["n_epochs"],
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        policy_kwargs=policy_kwargs,
-    )
+    # ----------------------------------------------------------------
+    # Optionally warm-start from a pretrained model (curriculum).
+    # Set pretrained_model to the path of a stage-1 model.zip to
+    # transfer its weights instead of training from scratch.
+    # ----------------------------------------------------------------
+    pretrained_model = "runs/2026-03-29_222036_VariationalGoal_run009/model.zip"  # set to a model path for curriculum warm-start
+
+    if pretrained_model is not None:
+        pretrained_model = str(pretrained_model).removesuffix(".zip")
+        print(f"Loading pretrained weights from: {pretrained_model}")
+        model = PPO.load(pretrained_model, env=env)
+        model.ent_coef = config["ent_coef"]  # reset entropy for new task
+    else:
+        model = PPO(
+            "CnnPolicy",
+            env,
+            verbose=1,
+            n_steps=config["n_steps"],
+            batch_size=config["batch_size"],
+            learning_rate=config["learning_rate"],
+            gamma=config["gamma"],
+            seed=config["seed"],
+            gae_lambda=0.95,
+            ent_coef=config["ent_coef"],
+            clip_range=0.2,
+            n_epochs=config["n_epochs"],
+            vf_coef=0.5,
+            max_grad_norm=0.5,
+            policy_kwargs=policy_kwargs,
+        )
 
     csv_cb = CSVLoggerCallback(run_dir / "metrics.csv")
     model.learn(total_timesteps=config["total_timesteps"], callback=csv_cb)

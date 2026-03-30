@@ -29,8 +29,8 @@ from envs.variational_goal_env import LevelConfig, generate_snapshot, save_snaps
 def main():
     parser = argparse.ArgumentParser(description="Generate and save a fixed level layout.")
     parser.add_argument("--seed",         type=int,   default=None,       help="Random seed (omit for a truly random layout)")
-    parser.add_argument("--width",        type=int,   default=20,         help="Grid width  (including border walls)")
-    parser.add_argument("--height",       type=int,   default=16,         help="Grid height (including border walls)")
+    parser.add_argument("--width",        type=int,   default=16,         help="Grid width  (including border walls)")
+    parser.add_argument("--height",       type=int,   default=12,         help="Grid height (including border walls)")
     parser.add_argument("--num_walls",    type=int,   default=1,          help="Number of dividing walls")
     parser.add_argument("--doors_per_wall", type=int, default=1,          help="Locked doors (and keys) per wall")
     parser.add_argument("--orientation",  type=str,   default="vertical", help="vertical | horizontal | random")

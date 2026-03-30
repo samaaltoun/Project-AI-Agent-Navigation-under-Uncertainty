@@ -17,20 +17,21 @@ import torch as th
 import torch.nn as nn
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
-from envs.variational_goal_env import LevelConfig, VariationalGoalEnv, register_env
+from envs.variational_goal_env import LevelConfig, VariationalGoalEnv, register_env, load_snapshot
 from envs.wrappers import ReducedActionSpace
 
 
 class MiniGridCNN(BaseFeaturesExtractor):
+    """MiniGrid-optimised CNN: 2x2 kernels, stride 1, no padding."""
     def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 128):
         super().__init__(observation_space, features_dim)
         n_input_channels = observation_space.shape[0]
         self.cnn = nn.Sequential(
-            nn.Conv2d(n_input_channels, 32, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(n_input_channels, 16, (2, 2)),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(16, 32, (2, 2)),
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(32, 64, (2, 2)),
             nn.ReLU(),
             nn.Flatten(),
         )
@@ -52,6 +53,8 @@ def main():
     parser.add_argument("--video_dir",    type=str,   default="videos")
     parser.add_argument("--video_prefix", type=str,   default="ppo_variationalgoal")
     parser.add_argument("--view_size", type=int, default=11)
+    parser.add_argument("--fps", type=int, default=10, help="Rendering speed in frames per second (higher = faster)")
+    parser.add_argument("--level", type=str, default=None, help="Path to a saved level snapshot JSON (e.g. levels/stage1.json). If provided, every episode uses the same fixed grid.")
 
     # LevelConfig args — must match what the model was trained on
     parser.add_argument("--width",            type=int,   default=20)
@@ -75,9 +78,14 @@ def main():
         min_gap=args.min_gap,
     )
 
+    snap = load_snapshot(args.level) if args.level else None
+
     def make_eval_env():
         render_mode = "rgb_array" if args.video else ("human" if args.render else None)
-        env = VariationalGoalEnv(level=level, render_mode=render_mode)
+        if snap is not None:
+            env = VariationalGoalEnv(snapshot=snap, render_mode=render_mode)
+        else:
+            env = VariationalGoalEnv(level=level, render_mode=render_mode)
         env = ReducedActionSpace(env)
         env = ViewSizeWrapper(env, agent_view_size=args.view_size)
         env = ImgObsWrapper(env)
@@ -93,7 +101,12 @@ def main():
 
     env = DummyVecEnv([make_eval_env])
     env = VecTransposeImage(env)
-    model = PPO.load(args.model, custom_objects={})
+
+    # Override render speed — applies when --render is used
+    env.venv.envs[0].unwrapped.metadata["render_fps"] = args.fps
+
+    model_path = args.model.removesuffix(".zip")  # SB3 appends .zip itself
+    model = PPO.load(model_path, custom_objects={})
 
     action_names = {0: "left", 1: "right", 2: "forward", 3: "pickup", 4: "toggle"}
     successes = 0

@@ -23,10 +23,10 @@ _PAIR_COLOURS = ["yellow", "red", "blue", "green", "purple", "grey"]
 
 @dataclass
 class ShapingConfig:
-    reward_pickup_key: float = 2.0
-    reward_open_door: float = 1.5
+    reward_pickup_key: float = 1.0
+    reward_open_door: float = 1.0
     reward_goal: float = 5.0
-    step_penalty: float = -0.001
+    step_penalty: float = -0.01
 
 
 @dataclass
@@ -57,7 +57,7 @@ class LevelConfig:
     """
     width: int = 20
     height: int = 16
-    num_walls: int = 2
+    num_walls: int = 1
     doors_per_wall: int = 1
     wall_orientation: str = "vertical"   # 'vertical' | 'horizontal' | 'random'
     min_gap: int = 3
@@ -551,6 +551,15 @@ class VariationalGoalEnv(MiniGridEnv):
         self._visited: set = {tuple(self.agent_pos)}
         self._steps_no_new_cell: int = 0
 
+        # Store generation metadata so generate_snapshot() can harvest them
+        self._snap_wall_orientations: List[str] = list(orientations)
+        self._snap_wall_coords: List[int] = [wall_coords[i] for i in range(cfg.num_walls)]
+        self._snap_door_colours: List[str] = [
+            _PAIR_COLOURS[wall_idx % len(_PAIR_COLOURS)]
+            for wall_idx in range(cfg.num_walls)
+            for _ in range(cfg.doors_per_wall)
+        ][:len(all_door_positions)]
+
     # ------------------------------------------------------------------
 
     def step(self, action: int):
@@ -558,119 +567,85 @@ class VariationalGoalEnv(MiniGridEnv):
             return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
         def next_target() -> tuple:
-            """Sub-goal: matching door if carrying key → next unpicked key → next unopened door → goal."""
+            """
+            Sub-goal priority:
+              1. If carrying a key → matching door for that key
+              2. Next unpicked key or unopened door (whichever is closer)
+              3. Goal — also wins immediately if it is closer than any
+                 remaining sub-goal (handles layouts where the agent can
+                 reach the exit without collecting every key/door)
+            """
+            cur = tuple(self.agent_pos)
+
+            # Priority 1 — carrying a key, go unlock its door
             if self.carrying is not None and self.carrying.type == "key":
                 key_colour = self.carrying.color
                 for i, colour in enumerate(_PAIR_COLOURS[:len(self.door_positions)]):
                     if colour == key_colour and not self._doors_opened[i]:
                         return self.door_positions[i]
+
+            # Collect remaining sub-goals
+            remaining = []
             for i, picked in enumerate(self._keys_picked):
                 if not picked:
-                    return self.key_positions[i]
+                    remaining.append(self.key_positions[i])
             for i, opened in enumerate(self._doors_opened):
                 if not opened:
-                    return self.door_positions[i]
-            return self.goal_pos
+                    remaining.append(self.door_positions[i])
+
+            if not remaining:
+                return self.goal_pos
+
+            # Priority 2 — goal wins if it is at least as close as the
+            # nearest remaining sub-goal
+            goal_dist = manhattan(cur, self.goal_pos)
+            nearest_sub = min(manhattan(cur, t) for t in remaining)
+            if goal_dist <= nearest_sub:
+                return self.goal_pos
+
+            # Otherwise go to the closest remaining sub-goal
+            return min(remaining, key=lambda t: manhattan(cur, t))
 
         gamma = 0.99
-        k = 0.15
+        k = 0.1
 
         # --- PRE-STEP ---
         pos0 = tuple(self.agent_pos)
         phi0 = -manhattan(pos0, next_target())
 
-        fwd0 = tuple(self.front_pos)
-        obj_ahead0 = self.grid.get(fwd0[0], fwd0[1])
-        ahead_is_locked_door = (
-            obj_ahead0 is not None
-            and obj_ahead0.type == "door"
-            and obj_ahead0.is_locked
-        )
         has_key = self.carrying is not None and self.carrying.type == "key"
         was_open = [self._door_is_open(dp) for dp in self.door_positions]
 
+        # Step penalty (encourages efficiency)
         shaped = float(self.shaping.step_penalty)
 
         # --- TRANSITION ---
         obs, reward, terminated, truncated, info = super().step(action)
         pos1 = tuple(self.agent_pos)
 
-        if pos1 not in self._visited:
-            self._visited.add(pos1)
-            shaped += 0.05  # increased bonus for new cells
-            self._steps_no_new_cell = 0
-        else:
-            self._steps_no_new_cell += 1
-            if self._steps_no_new_cell > 15:
-                shaped -= 0.01 * min(self._steps_no_new_cell / 15, 2.0)
+        # --- EVENT REWARDS (one-time, large, clear signals) ---
 
-        # Bump penalty
-        if action == self.actions.forward and pos1 == pos0:
-            shaped -= 0.05
-        # bonus for successful forward movement
-        elif action == self.actions.forward and pos1 != pos0:
-            shaped += 0.02
-
-        # penalty for doing nothing while carrying a key
-        if self.carrying is not None and pos1 == pos0:
-            shaped -= 0.02
-
-        # adjacency reward — carrying key and close to matching door
-        if self.carrying is not None and self.carrying.type == "key":
-            key_colour = self.carrying.color
-            for i, colour in enumerate(_PAIR_COLOURS[:len(self.door_positions)]):
-                if colour == key_colour and not self._doors_opened[i]:
-                    dist_to_door = manhattan(pos1, self.door_positions[i])
-                    if dist_to_door == 1:
-                        shaped += 0.05
-                    if dist_to_door == 0:
-                        shaped += 0.1
-                    break
-
-        # --- EVENT REWARDS ---
-        # Key pickup — only fires once per key
-        if has_key:
+        # Key pickup
+        if not has_key and self.carrying is not None and self.carrying.type == "key":
             for i, picked in enumerate(self._keys_picked):
                 if not picked:
-                    # Match by colour if possible
-                    key_colour = self.carrying.color
-                    expected_colour = _PAIR_COLOURS[i % len(_PAIR_COLOURS)]
-                    if key_colour == expected_colour or True:
-                        self._keys_picked[i] = True
-                        shaped += self.shaping.reward_pickup_key
-                        break
+                    self._keys_picked[i] = True
+                    shaped += self.shaping.reward_pickup_key
+                    break
 
         # Door opened
-        opened_this_step = False
-        for i, (opened, was) in enumerate(zip(self._doors_opened, was_open)):
-            if not opened and self._door_is_open(self.door_positions[i]) and not was:
+        for i, was in enumerate(was_open):
+            if not self._doors_opened[i] and self._door_is_open(self.door_positions[i]) and not was:
                 self._doors_opened[i] = True
                 shaped += self.shaping.reward_open_door
-                opened_this_step = True
 
         # Goal reached
         if terminated:
             shaped += self.shaping.reward_goal
 
-        # --- POTENTIAL SHAPING ---
+        # --- POTENTIAL-BASED REWARD SHAPING (clean, no ad-hoc bonuses) ---
         phi1 = -manhattan(pos1, next_target())
-        # stronger pull toward goal once all doors are open
-        all_doors_open = all(self._doors_opened) and len(self._doors_opened) > 0
-        k_current = 0.3 if all_doors_open else k
-        shaped += k_current * (gamma * phi1 - phi0)
-
-        # --- DOOR BOTTLENECK ---
-        if ahead_is_locked_door and has_key:
-            if action == self.actions.toggle:
-                shaped += 0.3 if opened_this_step else -0.05
-            elif action == self.actions.forward and pos1 == pos0:
-                shaped -= 0.05
-
-        if action == self.actions.toggle and not opened_this_step and not (ahead_is_locked_door and has_key):
-            shaped -= 0.02
-
-        if pos1 == pos0 and action in (self.actions.left, self.actions.right, self.actions.toggle):
-            shaped -= 0.05
+        shaped += k * (gamma * phi1 - phi0)
 
         total_reward = float(reward + shaped)
 
