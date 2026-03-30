@@ -1,3 +1,6 @@
+# initial evaluation script for PPO on the SimpleKeyDoor environment
+# used for rendering videos of the trained agent, and evaluating success rate over multiple episodes
+
 import argparse
 import gymnasium as gym
 import numpy as np

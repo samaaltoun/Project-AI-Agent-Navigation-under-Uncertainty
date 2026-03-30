@@ -1,0 +1,44 @@
+{
+  "width": 20,
+  "height": 16,
+  "wall_orientations": [
+    "vertical"
+  ],
+  "wall_coords": [
+    6
+  ],
+  "door_positions": [
+    [
+      6,
+      4
+    ],
+    [
+      6,
+      1
+    ]
+  ],
+  "door_colours": [
+    "yellow",
+    "yellow"
+  ],
+  "key_positions": [
+    [
+      2,
+      4
+    ],
+    [
+      2,
+      5
+    ]
+  ],
+  "goal_pos": [
+    16,
+    4
+  ],
+  "agent_start_pos": [
+    2,
+    14
+  ],
+  "agent_start_dir": 2,
+  "seed": 24
+}
