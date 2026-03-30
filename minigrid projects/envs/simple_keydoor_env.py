@@ -185,6 +185,8 @@ class SimpleKeyDoorEnv(MiniGridEnv):
 
         if terminated and tuple(self.agent_pos) == tuple(self.goal_pos):
             shaped += self.shaping.reward_goal
+        elif terminated:
+            shaped -= 5.0  # hit lava
 
         # ── POTENTIAL-BASED SHAPING ───────────────────────────────────────────
         phi1    = -manhattan_distance(pos1, get_target())
