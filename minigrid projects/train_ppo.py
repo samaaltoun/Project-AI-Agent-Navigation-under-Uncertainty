@@ -94,6 +94,7 @@ def main():
         "view_size": 7,         # agent field-of-view (default 7x7)
         "grid_size": 15,        # environment grid size
         "n_lava": 0,            # lava tiles scattered across the grid (some may be cleared near door/key/goal)
+        "finetune_from": None,  # set to None to train from scratch
     }
 
     run_name = time.strftime("%Y-%m-%d_%H%M%S") + f"_SimpleKeyDoor_PPO_noise{config['noise_prob']}"
@@ -119,23 +120,37 @@ def main():
     features_extractor_kwargs=dict(features_dim=128),
     )
 
-    model = PPO(
-    "CnnPolicy",
-    env,
-    verbose=1,
-    n_steps=config["n_steps"],
-    batch_size=config["batch_size"],
-    learning_rate=config["learning_rate"],
-    gamma=config["gamma"],
-    seed=config["seed"],
-    gae_lambda=0.95,
-    ent_coef=config["ent_coef"],
-    clip_range=0.2,
-    n_epochs=config["n_epochs"],
-    vf_coef=0.5,
-    max_grad_norm=0.5,
-    policy_kwargs=policy_kwargs,
-    )
+    if config.get("finetune_from"):
+        print(f"Fine-tuning from: {config['finetune_from']}")
+        model = PPO.load(
+            config["finetune_from"],
+            env=env,
+            custom_objects={"features_extractor_class": MiniGridCNN},
+            verbose=1,
+            n_steps=config["n_steps"],
+            batch_size=config["batch_size"],
+            learning_rate=config["learning_rate"],
+            ent_coef=config["ent_coef"],
+            n_epochs=config["n_epochs"],
+        )
+    else:
+        model = PPO(
+        "CnnPolicy",
+        env,
+        verbose=1,
+        n_steps=config["n_steps"],
+        batch_size=config["batch_size"],
+        learning_rate=config["learning_rate"],
+        gamma=config["gamma"],
+        seed=config["seed"],
+        gae_lambda=0.95,
+        ent_coef=config["ent_coef"],
+        clip_range=0.2,
+        n_epochs=config["n_epochs"],
+        vf_coef=0.5,
+        max_grad_norm=0.5,
+        policy_kwargs=policy_kwargs,
+        )
 
     csv_cb = CSVLoggerCallback(run_dir / "metrics.csv")
     model.learn(total_timesteps=config["total_timesteps"], callback=csv_cb)
