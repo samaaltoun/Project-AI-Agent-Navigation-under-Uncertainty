@@ -9,9 +9,9 @@ import torch as th
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv
+from functools import partial
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
-#from envs.simple_goal_env import register_env
 from envs.simple_keydoor_env import register_env
 from minigrid.wrappers import ImgObsWrapper, ViewSizeWrapper
 from stable_baselines3.common.vec_env import VecTransposeImage
@@ -61,8 +61,9 @@ class CSVLoggerCallback(BaseCallback):
             self._dump()
 
 
-def make_env(noise_prob: float = 0.0, view_size: int = 7):
-    env = gym.make("SimpleKeyDoor-v0", render_mode=None)
+def make_env(noise_prob: float = 0.0, view_size: int = 7, grid_size: int = 13, n_lava: int = 0):
+    register_env()   # each subprocess needs to register the env independently
+    env = gym.make("SimpleKeyDoor-v0", render_mode=None, size=grid_size, n_lava=n_lava)
     env = ReducedActionSpace(env)
     if noise_prob > 0.0:
         env = SensorNoiseWrapper(env, noise_prob=noise_prob)
@@ -80,17 +81,19 @@ def main():
     config = {
         "env_id": "SimpleKeyDoor-v0",
         "algo": "PPO",
-        "total_timesteps": 300_000,
+        "total_timesteps": 1_000_000,
         "seed": 42,
         "policy": "CnnPolicy",  # MiniGrid obs is image-like -> use CNN
-        "n_steps": 512,          # number of steps to run in each environment per update (i.e. batch size = n_steps * n_envs)
-        "batch_size": 256,          # number of samples per gradient update (max 512 here since we have n_envs=1)
-        "learning_rate": 3e-4,
+        "n_steps": 1024,          # number of steps to run in each environment per update (i.e. batch size = n_steps * n_envs)
+        "batch_size": 512,          # number of samples per gradient update (max 512 here since we have n_envs=1)
+        "learning_rate": 1e-4,
         "gamma": 0.99,
-        "ent_coef": 0.05,
-        "n_epochs": 10,
-        "noise_prob": 0.2,      # sensor noise level [0.0, 1.0]
+        "ent_coef": 0.1,
+        "n_epochs": 4,
+        "noise_prob": 0.0,      # sensor noise level [0.0, 1.0]
         "view_size": 7,         # agent field-of-view (default 7x7)
+        "grid_size": 15,        # environment grid size
+        "n_lava": 0,            # lava tiles scattered across the grid (some may be cleared near door/key/goal)
     }
 
     run_name = time.strftime("%Y-%m-%d_%H%M%S") + f"_SimpleKeyDoor_PPO_noise{config['noise_prob']}"
@@ -101,7 +104,14 @@ def main():
     np.random.seed(config["seed"])
 
     n_envs = 8
-    env = DummyVecEnv([lambda: make_env(noise_prob=config["noise_prob"], view_size=config["view_size"]) for _ in range(n_envs)])
+    env_fn = partial(
+        make_env,
+        noise_prob=config["noise_prob"],
+        view_size=config["view_size"],
+        grid_size=config["grid_size"],
+        n_lava=config["n_lava"],
+    )
+    env = SubprocVecEnv([env_fn for _ in range(n_envs)])
     env = VecTransposeImage(env)  # <-- converts (H,W,C) to (C,H,W) for CnnPolicy
 
     policy_kwargs = dict(
