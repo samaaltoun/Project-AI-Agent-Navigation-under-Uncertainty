@@ -41,6 +41,7 @@ from envs.simple_keydoor_env import register_env
 from envs.wrappers import ReducedActionSpace, SensorNoiseWrapper
 from envs.extractors import MiniGridCNN
 from envs.belief_map import BeliefMap
+from envs.pathfinding import optimal_path_length
 
 
 # ── Environment factory ────────────────────────────────────────────────────────
@@ -62,10 +63,10 @@ def _run_level(
     noise_prob: float,
     n_episodes: int,
     n_lava: int = 0,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, float]:
     """
     Load model fresh with a 1-env at noise_prob, run n_episodes, return:
-        (success_rate, mean_kl_per_step, mean_entropy_per_step)
+        (success_rate, mean_kl_per_step, mean_entropy_per_step, mean_optimality)
     """
     # Build a fresh 1-env for this noise level.
     vec_env = DummyVecEnv([lambda: _make_env(noise_prob, grid_size, n_lava)])
@@ -83,10 +84,21 @@ def _run_level(
     successes = 0
     ep_mean_kls: list[float] = []
     ep_mean_entropies: list[float] = []
+    ep_optimality: list[float] = []
 
     for _ in range(n_episodes):
         obs = vec_env.reset()
         done = False
+        steps = 0
+
+        # Compute optimal path for this episode layout
+        opt_len = optimal_path_length(
+            base.grid,
+            tuple(base.agent_pos),
+            tuple(base.key_pos),
+            tuple(base.door_pos),
+            tuple(base.goal_pos),
+        )
 
         bmap.reset()
         bmap.update(obs[0].transpose(1, 2, 0), base.agent_pos, base.agent_dir)
@@ -98,6 +110,7 @@ def _run_level(
             action, _ = model.predict(obs, deterministic=False)
             obs, _reward, dones, infos = vec_env.step(action)
             done = bool(dones[0])
+            steps += 1
 
             bmap.update(obs[0].transpose(1, 2, 0), base.agent_pos, base.agent_dir)
             step_kl.append(bmap.kl_from_truth(base.grid))
@@ -106,15 +119,21 @@ def _run_level(
         if infos[0].get("is_success", False):
             successes += 1
 
+        if opt_len > 0 and steps > 0:
+            ep_optimality.append(opt_len / steps)
+
         ep_mean_kls.append(float(np.mean(step_kl)))
         ep_mean_entropies.append(float(np.mean(step_entropy)))
 
     vec_env.close()
 
+    mean_opt = float(np.mean(ep_optimality)) if ep_optimality else 0.0
+
     return (
         successes / n_episodes,
         float(np.mean(ep_mean_kls)),
         float(np.mean(ep_mean_entropies)),
+        mean_opt,
     )
 
 
@@ -125,11 +144,12 @@ def _save_plot(
     success_rates: list[float],
     mean_kls: list[float],
     mean_entropies: list[float],
+    mean_optimalities: list[float],
     model_path: str,
     n_episodes: int,
 ) -> None:
-    """Three-panel figure: success rate, KL divergence, entropy — all vs noise."""
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    """Four-panel figure: success rate, KL divergence, entropy, optimality — all vs noise."""
+    fig, axes = plt.subplots(1, 4, figsize=(20, 4))
     xs = noise_levels
 
     # ── Panel 1: Success rate ──────────────────────────────────────────────────
@@ -162,6 +182,18 @@ def _save_plot(
     axes[2].set_xticks(xs)
     axes[2].grid(True, linewidth=0.5, alpha=0.6)
 
+    # ── Panel 4: Path optimality ratio ─────────────────────────────────────────
+    axes[3].plot(xs, mean_optimalities, "o-", color="darkorchid", linewidth=2, markersize=7)
+    for x, y in zip(xs, mean_optimalities):
+        axes[3].annotate(f"{y:.2f}", (x, y), textcoords="offset points",
+                         xytext=(0, 8), ha="center", fontsize=8)
+    axes[3].set_xlabel("Noise probability")
+    axes[3].set_ylabel("Path optimality ratio")
+    axes[3].set_title("Path optimality vs noise level")
+    axes[3].set_ylim(0, 1.12)
+    axes[3].set_xticks(xs)
+    axes[3].grid(True, linewidth=0.5, alpha=0.6)
+
     plt.suptitle(
         f"Noise sweep  —  {n_episodes} episodes per level  "
         f"(model: {Path(model_path).parent.name})",
@@ -193,24 +225,26 @@ def main():
     register_env()
 
     noise_levels = sorted(args.noise_levels)
-    success_rates:   list[float] = []
-    mean_kls:        list[float] = []
-    mean_entropies:  list[float] = []
+    success_rates:      list[float] = []
+    mean_kls:           list[float] = []
+    mean_entropies:     list[float] = []
+    mean_optimalities:  list[float] = []
 
     for noise in noise_levels:
         print(f"\n── noise={noise:.2f}  ({args.episodes} episodes) ──")
-        sr, mkl, mh = _run_level(args.model, args.grid_size, noise, args.episodes, args.n_lava)
+        sr, mkl, mh, mopt = _run_level(args.model, args.grid_size, noise, args.episodes, args.n_lava)
         success_rates.append(sr)
         mean_kls.append(mkl)
         mean_entropies.append(mh)
-        print(f"   success={sr:.2%}   mean_kl={mkl:.3f} bits   mean_entropy={mh:.3f} bits")
+        mean_optimalities.append(mopt)
+        print(f"   success={sr:.2%}   mean_kl={mkl:.3f} bits   mean_entropy={mh:.3f} bits   optimality={mopt:.3f}")
 
     print("\n── Summary ─────────────────────────────────────────────────────────")
-    print(f"{'noise':>6}  {'success':>8}  {'mean_kl':>9}  {'mean_H':>8}")
-    for noise, sr, mkl, mh in zip(noise_levels, success_rates, mean_kls, mean_entropies):
-        print(f"{noise:6.2f}  {sr:8.2%}  {mkl:9.3f}  {mh:8.3f}")
+    print(f"{'noise':>6}  {'success':>8}  {'mean_kl':>9}  {'mean_H':>8}  {'optim':>7}")
+    for noise, sr, mkl, mh, mopt in zip(noise_levels, success_rates, mean_kls, mean_entropies, mean_optimalities):
+        print(f"{noise:6.2f}  {sr:8.2%}  {mkl:9.3f}  {mh:8.3f}  {mopt:7.3f}")
 
-    _save_plot(noise_levels, success_rates, mean_kls, mean_entropies, args.model, args.episodes)
+    _save_plot(noise_levels, success_rates, mean_kls, mean_entropies, mean_optimalities, args.model, args.episodes)
 
 
 if __name__ == "__main__":

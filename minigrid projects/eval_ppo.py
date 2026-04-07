@@ -18,6 +18,7 @@ import matplotlib
 matplotlib.use("Agg")   # file-only backend; safe on headless machines
 import matplotlib.pyplot as plt
 from envs.belief_map import BeliefMap
+from envs.pathfinding import optimal_path_length
 
 
 def _plot_belief_metrics(
@@ -155,6 +156,7 @@ def main():
     all_kl_histories: list = []
 
     ep_rewards = []
+    ep_optimality = []
     successes  = 0
     ep_shown   = 0        # episodes printed/counted (target = args.episodes)
     ep_attempted = 0      # total episodes run (used for real success-rate calc)
@@ -167,6 +169,14 @@ def main():
             break
 
         obs = env.reset()
+        # Compute optimal path length for this episode layout
+        optimal_len = optimal_path_length(
+            base.grid,
+            tuple(base.agent_pos),
+            tuple(base.key_pos),
+            tuple(base.door_pos),
+            tuple(base.goal_pos),
+        )
         done  = False
         total = 0.0
         step  = 0
@@ -245,6 +255,13 @@ def main():
         if is_success:
             successes += 1
 
+        if optimal_len > 0:
+            ratio = optimal_len / step
+            ep_optimality.append(ratio)
+            print(f"PATH OPTIMALITY: {ratio:.3f}  (optimal={optimal_len}, actual={step})")
+        else:
+            print(f"PATH OPTIMALITY: N/A  (no valid path found)")
+
     env.close()
 
     if bmap is not None and all_entropy_histories:
@@ -259,6 +276,8 @@ def main():
     else:
         print(f"Success rate: {successes / ep_attempted:.2%}")
     print(f"Mean reward: {np.mean(ep_rewards):.3f} | Std: {np.std(ep_rewards):.3f}")
+    if ep_optimality:
+        print(f"Mean path optimality: {np.mean(ep_optimality):.3f} | Std: {np.std(ep_optimality):.3f}")
 
 
 if __name__ == "__main__":
