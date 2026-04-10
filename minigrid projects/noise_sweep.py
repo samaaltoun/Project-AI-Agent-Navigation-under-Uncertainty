@@ -41,6 +41,7 @@ from envs.simple_keydoor_env import register_env
 from envs.wrappers import ReducedActionSpace, SensorNoiseWrapper
 from envs.extractors import MiniGridCNN
 from envs.belief_map import BeliefMap
+from envs.astar import optimal_path_length
 
 
 # ── Environment factory ────────────────────────────────────────────────────────
@@ -62,10 +63,12 @@ def _run_level(
     noise_prob: float,
     n_episodes: int,
     n_lava: int = 0,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, float | None]:
     """
     Load model fresh with a 1-env at noise_prob, run n_episodes, return:
-        (success_rate, mean_kl_per_step, mean_entropy_per_step)
+        (success_rate, mean_kl_per_step, mean_entropy_per_step, mean_path_optimality_ratio)
+
+    mean_path_optimality_ratio is None if no successful episodes occurred.
     """
     # Build a fresh 1-env for this noise level.
     vec_env = DummyVecEnv([lambda: _make_env(noise_prob, grid_size, n_lava)])
@@ -83,10 +86,26 @@ def _run_level(
     successes = 0
     ep_mean_kls: list[float] = []
     ep_mean_entropies: list[float] = []
+    ep_path_ratios: list[float] = []
 
     for _ in range(n_episodes):
         obs = vec_env.reset()
         done = False
+
+        # ── Capture initial state for A* (must happen right after reset) ──────
+        ep_start_pos = tuple(base.agent_pos)
+        ep_key_pos   = tuple(base.key_pos)
+        ep_door_pos  = tuple(base.door_pos)
+        ep_goal_pos  = tuple(base.goal_pos)
+        opt_len = optimal_path_length(
+            base.grid, grid_size,
+            start=ep_start_pos,
+            key_pos=ep_key_pos,
+            door_pos=ep_door_pos,
+            goal_pos=ep_goal_pos,
+        )
+        prev_pos     = ep_start_pos
+        actual_cells = 0
 
         bmap.reset()
         bmap.update(obs[0].transpose(1, 2, 0), base.agent_pos, base.agent_dir)
@@ -99,22 +118,33 @@ def _run_level(
             obs, _reward, dones, infos = vec_env.step(action)
             done = bool(dones[0])
 
+            # Track cell moves
+            new_pos = tuple(base.agent_pos)
+            if new_pos != prev_pos:
+                actual_cells += 1
+            prev_pos = new_pos
+
             bmap.update(obs[0].transpose(1, 2, 0), base.agent_pos, base.agent_dir)
             step_kl.append(bmap.kl_from_truth(base.grid))
             step_entropy.append(bmap.mean_entropy())
 
-        if infos[0].get("is_success", False):
+        is_success = infos[0].get("is_success", False)
+        if is_success:
             successes += 1
+            if opt_len is not None and opt_len > 0:
+                ep_path_ratios.append(actual_cells / opt_len)
 
         ep_mean_kls.append(float(np.mean(step_kl)))
         ep_mean_entropies.append(float(np.mean(step_entropy)))
 
     vec_env.close()
 
+    mean_ratio = float(np.mean(ep_path_ratios)) if ep_path_ratios else None
     return (
         successes / n_episodes,
         float(np.mean(ep_mean_kls)),
         float(np.mean(ep_mean_entropies)),
+        mean_ratio,
     )
 
 
@@ -125,11 +155,12 @@ def _save_plot(
     success_rates: list[float],
     mean_kls: list[float],
     mean_entropies: list[float],
+    mean_path_ratios: list[float | None],
     model_path: str,
     n_episodes: int,
 ) -> None:
-    """Three-panel figure: success rate, KL divergence, entropy — all vs noise."""
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    """Four-panel figure: success rate, KL divergence, entropy, path optimality — all vs noise."""
+    fig, axes = plt.subplots(1, 4, figsize=(20, 4))
     xs = noise_levels
 
     # ── Panel 1: Success rate ──────────────────────────────────────────────────
@@ -162,6 +193,29 @@ def _save_plot(
     axes[2].set_xticks(xs)
     axes[2].grid(True, linewidth=0.5, alpha=0.6)
 
+    # ── Panel 4: Path optimality ratio ────────────────────────────────────────
+    # Only plot noise levels where we had at least one successful episode.
+    valid_xs     = [x for x, r in zip(xs, mean_path_ratios) if r is not None]
+    valid_ratios = [r for r in mean_path_ratios if r is not None]
+    if valid_xs:
+        axes[3].plot(valid_xs, valid_ratios, "o-", color="mediumpurple",
+                     linewidth=2, markersize=7)
+        axes[3].axhline(1.0, color="red", linestyle="--", linewidth=1.2,
+                        label="Optimal (1.0)")
+        for x, r in zip(valid_xs, valid_ratios):
+            axes[3].annotate(f"{r:.2f}", (x, r), textcoords="offset points",
+                             xytext=(0, 8), ha="center", fontsize=8)
+        axes[3].legend(fontsize=8)
+    else:
+        axes[3].text(0.5, 0.5, "No successful episodes", ha="center",
+                     va="center", transform=axes[3].transAxes, fontsize=10)
+    axes[3].set_xlabel("Noise probability")
+    axes[3].set_ylabel("Mean path optimality ratio")
+    axes[3].set_title("Path optimality ratio vs noise level\n(successful episodes only)")
+    axes[3].set_ylim(bottom=0)
+    axes[3].set_xticks(xs)
+    axes[3].grid(True, linewidth=0.5, alpha=0.6)
+
     plt.suptitle(
         f"Noise sweep  —  {n_episodes} episodes per level  "
         f"(model: {Path(model_path).parent.name})",
@@ -192,25 +246,29 @@ def main():
 
     register_env()
 
-    noise_levels = sorted(args.noise_levels)
-    success_rates:   list[float] = []
-    mean_kls:        list[float] = []
-    mean_entropies:  list[float] = []
+    noise_levels      = sorted(args.noise_levels)
+    success_rates:    list[float]        = []
+    mean_kls:         list[float]        = []
+    mean_entropies:   list[float]        = []
+    mean_path_ratios: list[float | None] = []
 
     for noise in noise_levels:
         print(f"\n── noise={noise:.2f}  ({args.episodes} episodes) ──")
-        sr, mkl, mh = _run_level(args.model, args.grid_size, noise, args.episodes, args.n_lava)
+        sr, mkl, mh, mpr = _run_level(args.model, args.grid_size, noise, args.episodes, args.n_lava)
         success_rates.append(sr)
         mean_kls.append(mkl)
         mean_entropies.append(mh)
-        print(f"   success={sr:.2%}   mean_kl={mkl:.3f} bits   mean_entropy={mh:.3f} bits")
+        mean_path_ratios.append(mpr)
+        ratio_str = f"{mpr:.2f}x" if mpr is not None else "n/a"
+        print(f"   success={sr:.2%}   mean_kl={mkl:.3f} bits   mean_entropy={mh:.3f} bits   path_ratio={ratio_str}")
 
     print("\n── Summary ─────────────────────────────────────────────────────────")
-    print(f"{'noise':>6}  {'success':>8}  {'mean_kl':>9}  {'mean_H':>8}")
-    for noise, sr, mkl, mh in zip(noise_levels, success_rates, mean_kls, mean_entropies):
-        print(f"{noise:6.2f}  {sr:8.2%}  {mkl:9.3f}  {mh:8.3f}")
+    print(f"{'noise':>6}  {'success':>8}  {'mean_kl':>9}  {'mean_H':>8}  {'path_ratio':>11}")
+    for noise, sr, mkl, mh, mpr in zip(noise_levels, success_rates, mean_kls, mean_entropies, mean_path_ratios):
+        ratio_str = f"{mpr:.2f}x" if mpr is not None else "       n/a"
+        print(f"{noise:6.2f}  {sr:8.2%}  {mkl:9.3f}  {mh:8.3f}  {ratio_str:>11}")
 
-    _save_plot(noise_levels, success_rates, mean_kls, mean_entropies, args.model, args.episodes)
+    _save_plot(noise_levels, success_rates, mean_kls, mean_entropies, mean_path_ratios, args.model, args.episodes)
 
 
 if __name__ == "__main__":

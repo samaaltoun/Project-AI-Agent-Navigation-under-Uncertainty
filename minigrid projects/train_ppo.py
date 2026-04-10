@@ -81,7 +81,7 @@ def main():
     config = {
         "env_id": "SimpleKeyDoor-v0",
         "algo": "PPO",
-        "total_timesteps": 1_000_000,
+        "total_timesteps": 2_000_000,
         "seed": 42,
         "policy": "CnnPolicy",  # MiniGrid obs is image-like -> use CNN
         "n_steps": 1024,          # number of steps to run in each environment per update (i.e. batch size = n_steps * n_envs)
@@ -89,10 +89,10 @@ def main():
         "learning_rate": 1e-4,
         "gamma": 0.99,
         "ent_coef": 0.1,
-        "n_epochs": 4,
-        "noise_prob": 0.0,      # sensor noise level [0.0, 1.0]
+        "n_epochs": 10,
+        "noise_prob": 0.2,      # sensor noise level [0.0, 1.0]
         "view_size": 7,         # agent field-of-view (default 7x7)
-        "grid_size": 15,        # environment grid size
+        "grid_size": 13,        # environment grid size
         "n_lava": 0,            # lava tiles scattered across the grid (some may be cleared near door/key/goal)
         "finetune_from": None,  # set to None to train from scratch
     }

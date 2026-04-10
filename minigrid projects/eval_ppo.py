@@ -10,6 +10,7 @@ from minigrid.wrappers import ImgObsWrapper
 from envs.simple_keydoor_env import register_env
 from envs.wrappers import ReducedActionSpace, SensorNoiseWrapper
 from envs.extractors import MiniGridCNN
+from envs.astar import optimal_path_length
 
 from gymnasium.wrappers import RecordVideo
 
@@ -84,6 +85,37 @@ def _plot_belief_metrics(
     print(f"Saved belief metrics plot to: {out_path}")
 
 
+def _plot_path_optimality(ratios: list, noise_prob: float, model_path: str) -> None:
+    """
+    Save a bar chart of per-episode path optimality ratios next to the model.
+
+    Each bar shows actual_cells / optimal_a_star_cells for one successful
+    episode.  The dashed red line at 1.0 marks the theoretical optimum.
+    """
+    fig, ax = plt.subplots(figsize=(max(6, len(ratios) * 0.4 + 2), 4))
+
+    xs = np.arange(1, len(ratios) + 1)
+    ax.bar(xs, ratios, color="steelblue", alpha=0.75, width=0.6)
+    ax.axhline(1.0, color="red", linestyle="--", linewidth=1.5, label="Optimal (ratio = 1.0)")
+
+    ax.set_xlabel("Episode (successful only)")
+    ax.set_ylabel("Path optimality ratio")
+    ax.set_title(
+        f"Path Optimality Ratio  (noise={noise_prob})\n"
+        f"mean={np.mean(ratios):.2f}  std={np.std(ratios):.2f}  "
+        f"[{len(ratios)} episodes]"
+    )
+    ax.set_xticks(xs)
+    ax.legend(fontsize=9)
+    ax.grid(True, axis="y", linewidth=0.5, alpha=0.6)
+    plt.tight_layout()
+
+    out_path = Path(model_path).parent / f"path_optimality_noise{noise_prob}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved path optimality plot to: {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True, help="Path to model.zip")
@@ -100,6 +132,8 @@ def main():
                         help="Track belief map per step; save entropy/KL plot next to model")
     parser.add_argument("--only_success", action="store_true",
                         help="Only show/record successful episodes; runs until N successes collected")
+    parser.add_argument("--fixed_seed", type=int, default=None,
+                        help="Fix the map layout by using this seed on every episode reset (for fair model comparison)")
 
     args = parser.parse_args()
 
@@ -154,11 +188,12 @@ def main():
     all_entropy_histories: list = []   # one list of floats per episode
     all_kl_histories: list = []
 
-    ep_rewards = []
-    successes  = 0
-    ep_shown   = 0        # episodes printed/counted (target = args.episodes)
-    ep_attempted = 0      # total episodes run (used for real success-rate calc)
-    max_attempts = args.episodes * 20   # safety cap when --only_success
+    ep_rewards        = []
+    ep_path_ratios    = []   # path optimality ratio for each successful episode
+    successes         = 0
+    ep_shown          = 0        # episodes printed/counted (target = args.episodes)
+    ep_attempted      = 0        # total episodes run (used for real success-rate calc)
+    max_attempts      = args.episodes * 20   # safety cap when --only_success
 
     while ep_shown < args.episodes:
         if args.only_success and ep_attempted >= max_attempts:
@@ -166,10 +201,35 @@ def main():
                   f"Collected {ep_shown}/{args.episodes} successes.")
             break
 
-        obs = env.reset()
+        if args.fixed_seed is not None:
+            # Force the same map layout every episode across models/noise levels.
+            # env_method calls reset(seed=...) on the underlying gymnasium env,
+            # which seeds MiniGrid's RNG before generating the grid.
+            result = env.env_method("reset", seed=args.fixed_seed)
+            obs_hwc = result[0][0]                               # (H, W, C)
+            obs = obs_hwc[np.newaxis].transpose(0, 3, 1, 2)     # (1, C, H, W)
+        else:
+            obs = env.reset()
+
         done  = False
         total = 0.0
         step  = 0
+
+        # ── A* path optimality: capture episode-start state ───────────────────
+        # Read positions and grid NOW (before any steps change them).
+        ep_start_pos  = tuple(base.agent_pos)
+        ep_key_pos    = tuple(base.key_pos)
+        ep_door_pos   = tuple(base.door_pos)
+        ep_goal_pos   = tuple(base.goal_pos)
+        opt_len = optimal_path_length(
+            base.grid, args.grid_size,
+            start=ep_start_pos,
+            key_pos=ep_key_pos,
+            door_pos=ep_door_pos,
+            goal_pos=ep_goal_pos,
+        )
+        prev_agent_pos = ep_start_pos
+        actual_cells   = 0   # counts successful forward moves (position changed)
 
         # ── Belief map: reset and initialise with the first observation ───────
         if bmap is not None:
@@ -211,6 +271,12 @@ def main():
             done = bool(dones[0])
             step += 1
 
+            # ── Track actual cell moves for path optimality ───────────────────
+            new_pos = tuple(base.agent_pos)
+            if new_pos != prev_agent_pos:
+                actual_cells += 1
+            prev_agent_pos = new_pos
+
             # ── Belief map update with the new observation ────────────────────
             if bmap is not None:
                 bmap.update(obs[0].transpose(1, 2, 0), base.agent_pos, base.agent_dir)
@@ -237,6 +303,17 @@ def main():
         print(f"FINAL POS (from info): {final_pos} | GOAL POS: {goal_pos}")
         print("SUCCESS:", is_success)
 
+        # ── Path optimality ratio (successful episodes only) ──────────────────
+        if is_success and opt_len is not None and opt_len > 0:
+            ratio = actual_cells / opt_len
+            ep_path_ratios.append(ratio)
+            print(
+                f"Path optimality: {actual_cells} cells moved / "
+                f"{opt_len} A* optimal = {ratio:.2f}x  "
+                f"(start={ep_start_pos} key={ep_key_pos} "
+                f"door={ep_door_pos} goal={ep_goal_pos})"
+            )
+
         ep_rewards.append(total)
         if bmap is not None:
             all_entropy_histories.append(ep_entropy)
@@ -250,15 +327,26 @@ def main():
     if bmap is not None and all_entropy_histories:
         _plot_belief_metrics(all_entropy_histories, all_kl_histories, args.noise, args.model)
 
+    if ep_path_ratios:
+        _plot_path_optimality(ep_path_ratios, args.noise, args.model)
+
     if args.video:
         print(f"✅ Videos saved to: {args.video_dir}")
 
-    print(f"Episodes shown: {ep_shown}")
+    print(f"\nEpisodes shown: {ep_shown}")
     if args.only_success:
         print(f"Success rate: {successes}/{ep_attempted} attempts = {successes/ep_attempted:.2%}")
     else:
         print(f"Success rate: {successes / ep_attempted:.2%}")
     print(f"Mean reward: {np.mean(ep_rewards):.3f} | Std: {np.std(ep_rewards):.3f}")
+
+    if ep_path_ratios:
+        print(
+            f"Path optimality ratio: mean={np.mean(ep_path_ratios):.2f} "
+            f"std={np.std(ep_path_ratios):.2f} "
+            f"(1.0 = optimal, higher = more detours) "
+            f"[{len(ep_path_ratios)}/{ep_shown} episodes had a valid A* reference]"
+        )
 
 
 if __name__ == "__main__":
