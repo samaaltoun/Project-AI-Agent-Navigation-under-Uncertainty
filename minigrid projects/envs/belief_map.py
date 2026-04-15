@@ -3,30 +3,41 @@ Belief map for POMDP navigation under uncertainty.
 
 Each cell in the grid is modelled as a categorical distribution over
 K = 11 object types (MiniGrid OBJECT_TO_IDX, indices 0–10).  The
-distribution is updated step-by-step using Bayesian inference, with the
-noise model from SensorNoiseWrapper as the likelihood.
+distribution is updated step-by-step using Bayesian inference with
+a configurable sensor model (true-positive rate) and temporal decay.
 
 MiniGrid object type indices (OBJECT_TO_IDX):
     0: unseen   1: empty   2: wall    3: floor   4: door
     5: key      6: ball    7: box     8: goal    9: lava   10: agent
 
-Theoretical framing: the whole task is a POMDP.  The agent acts under
-partial observability (7×7 egocentric view in a 13×13 world) and sensor
-noise.  The belief map is the POMDP belief state b(s) — a distribution
-over possible world states.
+Sensor model
+─────────────
+    tpr  — True Positive Rate: probability that the sensor reports the
+           correct object type.  Defaults to  1 − 0.9 × noise_prob.
+    fpr  — False Positive Rate per alternative type: (1 − tpr) / 9.
+
+    The likelihood for observation z given true type t:
+        P(z | t) = tpr      if t == z
+        P(z | t) = fpr      if t != z   (for each of the 9 other types)
+
+Temporal decay
+──────────────
+    decay — After each step, every cell's belief drifts toward the
+            uninformative uniform prior:
+                belief ← (1 − decay) · belief + decay · uniform
+            A decay of 0.0 means perfect memory; 0.05 means 5% drift
+            per step, so unobserved cells gradually forget.
 
 Usage (eval loop):
-    bmap = BeliefMap(grid_size=13, noise_prob=0.2)
-    bmap.reset()                                   # start of episode
+    bmap = BeliefMap(grid_size=15, noise_prob=0.2, decay=0.02)
+    bmap.reset()
 
     # After every env.reset() / env.step():
-    raw_img = obs[0].transpose(1, 2, 0)            # (C,H,W) → (H,W,C)
+    raw_img = obs["image"]                          # (H, W, 3) from MiniGrid
     bmap.update(raw_img, base.agent_pos, base.agent_dir)
 
-    h = bmap.mean_entropy()                        # scalar, decreases as
-                                                   #   agent explores
-    kl = bmap.kl_from_truth(base.grid)             # scalar, higher noise
-                                                   #   → higher KL
+    h  = bmap.mean_entropy()                        # scalar, bits
+    kl = bmap.kl_from_truth(base.grid)              # scalar, bits
 """
 
 from __future__ import annotations
@@ -37,6 +48,10 @@ import numpy as np
 NUM_TYPES = 11       # type indices 0–10
 VALID_TYPES = 10     # types 1–10 are observable object types (0 = "unseen")
 MAX_ENTROPY = np.log2(VALID_TYPES)   # entropy of uniform prior ≈ 3.32 bits
+
+# Uniform prior over valid types (used for reset and decay target)
+_UNIFORM_PRIOR = np.zeros(NUM_TYPES, dtype=np.float64)
+_UNIFORM_PRIOR[1:] = 1.0 / VALID_TYPES
 
 
 # ── BeliefMap ─────────────────────────────────────────────────────────────────
@@ -50,21 +65,43 @@ class BeliefMap:
     Parameters
     ----------
     grid_size : int
-        Side length of the square grid (e.g. 13).
+        Side length of the square grid (e.g. 15).
     noise_prob : float
         Sensor noise probability matching the SensorNoiseWrapper value.
-        0.0 → perfectly reliable observations;
-        1.0 → every visible cell is randomly re-labelled.
+        Used to derive the default true-positive rate when *tpr* is None.
+    tpr : float or None
+        True Positive Rate of the sensor.  If None, derived as
+        ``1.0 − 0.9 × noise_prob``.
+    decay : float
+        Per-step decay toward the uniform prior.  0.0 = no forgetting.
     view_size : int
         Agent egocentric view size (default 7 for a 7×7 window).
     """
 
     NUM_TYPES = NUM_TYPES
 
-    def __init__(self, grid_size: int, noise_prob: float = 0.0, view_size: int = 7):
+    def __init__(
+        self,
+        grid_size: int,
+        noise_prob: float = 0.0,
+        view_size: int = 7,
+        tpr: float | None = None,
+        decay: float = 0.0,
+    ):
         self.grid_size = grid_size
         self.noise_prob = float(noise_prob)
         self.view_size = view_size
+        self.decay = float(decay)
+
+        # True positive rate
+        if tpr is not None:
+            self.tpr = float(tpr)
+        else:
+            # Derive from noise_prob:  TPR = 1 − 0.9·p
+            self.tpr = 1.0 - 0.9 * self.noise_prob
+
+        # False positive rate per alternative type
+        self.fpr = (1.0 - self.tpr) / max(VALID_TYPES - 1, 1)
 
         # belief[x, y, t] = P(cell (x,y) has type t)
         self.belief = np.empty((grid_size, grid_size, NUM_TYPES), dtype=np.float64)
@@ -89,19 +126,26 @@ class BeliefMap:
         agent_dir: int,
     ) -> None:
         """
-        Bayesian update for every visible cell in the current observation.
+        Apply temporal decay, then Bayesian-update every visible cell.
 
         Parameters
         ----------
         obs_image : np.ndarray, shape (view_size, view_size, 3)
-            Raw egocentric image as returned by ImgObsWrapper (before
-            VecTransposeImage).  obs_image[lx, ly, 0] is the object-type
+            Raw egocentric image.  obs_image[lx, ly, 0] is the object-type
             index at local position (lx, ly).
         agent_pos : array-like of length 2
             Agent's current world (x, y) position.
         agent_dir : int
             Agent's facing direction: 0=right, 1=down, 2=left, 3=up.
         """
+        # ── Temporal decay ────────────────────────────────────────────────────
+        if self.decay > 0:
+            self.belief[:] = (
+                (1.0 - self.decay) * self.belief
+                + self.decay * _UNIFORM_PRIOR[np.newaxis, np.newaxis, :]
+            )
+
+        # ── Bayesian update for visible cells ─────────────────────────────────
         vs = self.view_size
         ax, ay = int(agent_pos[0]), int(agent_pos[1])
 
@@ -125,13 +169,8 @@ class BeliefMap:
         """
         Shannon entropy of the belief at every cell (base-2, in bits).
 
-        H[x, y] = −∑_t  B[x,y,t] · log₂ B[x,y,t]
-
-        Returns
-        -------
-        np.ndarray, shape (grid_size, grid_size)
-            Entropy per cell.  0 bits → completely certain;
-            log₂(10) ≈ 3.32 bits → maximally uncertain (uniform prior).
+        Returns shape (grid_size, grid_size).
+        0 bits → completely certain;  log₂(10) ≈ 3.32 bits → maximally uncertain.
         """
         b = self.belief
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -149,19 +188,7 @@ class BeliefMap:
         For a one-hot ground-truth distribution at each cell:
             KL( truth ‖ belief ) = −log₂( belief[true_type] )
 
-        This measures how surprised the belief map is by the true
-        object layout.  Higher noise → weaker Bayesian updates →
-        higher KL divergence.
-
-        Parameters
-        ----------
-        ground_truth_grid : minigrid.core.grid.Grid
-            The environment's internal Grid object (env.unwrapped.grid).
-
-        Returns
-        -------
-        float
-            Mean KL divergence in bits, averaged over all grid cells.
+        Returns float — mean KL divergence in bits.
         """
         from minigrid.core.constants import OBJECT_TO_IDX
 
@@ -176,7 +203,6 @@ class BeliefMap:
                 else:
                     true_type = OBJECT_TO_IDX.get(cell.type, 1)
 
-                # P(true_type) in our belief — clamp to avoid log(0)
                 p = max(float(self.belief[wx, wy, true_type]), 1e-10)
                 total += -np.log2(p)
 
@@ -187,30 +213,7 @@ class BeliefMap:
     def _local_to_world(
         self, lx: int, ly: int, ax: int, ay: int, agent_dir: int
     ) -> tuple[int, int]:
-        """
-        Convert local egocentric coordinates to world (x, y) coordinates.
-
-        Derivation
-        ----------
-        MiniGrid's gen_obs_grid():
-          1. Slices the world grid starting at (topX, topY) — a corner that
-             depends on the agent's position and facing direction.
-          2. Applies (agent_dir + 1) rotate_left operations to the slice.
-
-        To invert:
-          - Apply (agent_dir + 1) rotate_right operations:
-              (x, y)  →rotate_right→  (size−1−y, x)   [for a size×size grid]
-          - Add (topX, topY).
-
-        Formulae (verified for all four directions, view_size=7):
-            s = view_size − 1 = 6
-            h = view_size // 2 = 3
-
-            dir=0 (right) :  wx = ax + s − ly,  wy = ay − h + lx
-            dir=1 (down)  :  wx = ax + h − lx,  wy = ay + s − ly
-            dir=2 (left)  :  wx = ax − s + ly,  wy = ay + h − lx
-            dir=3 (up)    :  wx = ax − h + lx,  wy = ay − s + ly
-        """
+        """Convert local egocentric coordinates to world (x, y) coordinates."""
         s = self.view_size - 1     # 6
         h = self.view_size // 2    # 3
 
@@ -227,42 +230,30 @@ class BeliefMap:
         """
         Update the categorical belief at cell (wx, wy) given observation z.
 
-        Sensor model (from SensorNoiseWrapper)
-        ───────────────────────────────────────
-        With probability  (1 − noise_prob): observation equals true type.
-        With probability  noise_prob      : observation is uniform over
-                                            types 1–10 (regardless of truth).
+        Sensor model (parametrised by TPR)
+        ───────────────────────────────────
+        P(z | true_type = t) =
+            tpr                    if t == z     (correct detection)
+            (1 − tpr) / 9         otherwise     (false positive)
 
-        Likelihood:
-            P(z | true_type = t) =
-                (1 − p) + p/10    if t == z
-                p/10              otherwise
-
-        Where p = self.noise_prob.
-
-        Special cases:
-            p = 0.0  →  L(t) = [t == z]  → posterior = Dirac at z
-            p = 1.0  →  L(t) = 1/10 ∀t  → posterior = prior (no info)
-
-        Update rule (unnormalised):
-            posterior[t] ∝ L(t) · prior[t]
+        Update rule:
+            posterior[t] ∝ P(z | t) · prior[t]
         """
-        p = self.noise_prob
-        uniform_lh = p / VALID_TYPES   # p/10
+        tpr = self.tpr
+        fpr = self.fpr
 
-        prior = self.belief[wx, wy]          # numpy view into belief array
+        prior = self.belief[wx, wy]
 
-        # Start by applying the uniform component of the likelihood to all types
-        posterior = prior * uniform_lh       # new array — does not modify prior
+        # Apply likelihood: default = false-positive rate for all types
+        posterior = prior * fpr
 
-        # Boost likelihood for the observed type z (if it's a valid type 1–10)
+        # Boost likelihood for the observed type z
         if 1 <= z <= 10:
-            posterior[z] = prior[z] * ((1.0 - p) + uniform_lh)
+            posterior[z] = prior[z] * tpr
 
-        # Type 0 (unseen) has zero likelihood — posterior stays 0 because
-        # prior[0] == 0 after reset(), and we only update valid types.
+        # Type 0 (unseen) stays at 0 because prior[0] == 0 after reset
 
         total = posterior.sum()
         if total > 1e-12:
             self.belief[wx, wy] = posterior / total
-        # If total ≈ 0 (degenerate belief), keep the prior to avoid NaN.
+        # If total ≈ 0 (degenerate), keep current belief to avoid NaN.
