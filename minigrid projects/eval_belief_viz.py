@@ -146,7 +146,12 @@ def main():
     model = PPO.load(args.model, env=env,
                      custom_objects={"features_extractor_class": MiniGridCNN})
 
-    base = env.venv.envs[0].unwrapped
+    # DummyVecEnv (no VecTransposeImage) → env.envs[0]
+    # VecTransposeImage wraps DummyVecEnv  → env.venv.envs[0]
+    if hasattr(env, "venv"):
+        base = env.venv.envs[0].unwrapped
+    else:
+        base = env.envs[0].unwrapped
 
     # Get belief map — from wrapper or standalone
     if belief_wrapper_ref[0] is not None:
