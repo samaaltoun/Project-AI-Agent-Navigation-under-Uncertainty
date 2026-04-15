@@ -1,229 +1,490 @@
 from __future__ import annotations
 
+import math
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
+import numpy as np
 import gymnasium as gym
-
 from minigrid.core.constants import COLOR_NAMES
 from minigrid.core.grid import Grid
 from minigrid.core.mission import MissionSpace
-from minigrid.core.world_object import Door, Goal, Key, Lava, Wall
+from minigrid.core.world_object import Door, Goal, Key, Wall
 from minigrid.minigrid_env import MiniGridEnv
+
+#config dataclasses
+
+@dataclass
+class SensorConfig:
+    accuracy: float = 1.0       # perfect within-window accuracy
+    noise_prob: float = 0.0     # prob of dropout per cell per step — applied inside belief update
+    tpr: float = 0.85           # prob that sensor detects something when it actually exists
+    tnr: float = 0.90           # prob sensor correctly classifies "not present"
+    wall_prior: float = 0.5
+    key_prior: float = 0.05
+    door_prior: float = 0.05
+    goal_prior: float = 0.05
+    decay: float = 0.001        # slower forgetting — needed under heavy observation dropout
 
 
 @dataclass
-class ShapingConfig:
-    reward_pickup_key: float = 2.0
-    reward_open_door: float  = 1.5
-    reward_goal: float       = 5.0
-    step_penalty: float      = -0.001
+class RewardConfig:
+    reward_pickup_key: float = 8.0
+    reward_open_door: float = 5.0
+    reward_goal: float = 15.0
+    step_penalty: float = -0.001
+    bump_penalty: float = -0.05
+    pointless_toggle_penalty: float = -0.5   # heavy penalty toggling uselessly must not be viable
+    reward_progress: float = 1.0             # reward per step closer to current sub-goal
 
 
-class SimpleKeyDoorEnv(MiniGridEnv):
-    """
-    Single-room layout with lava hazards:
-    - One vertical wall dividing left / right sections
-    - Key on the left, locked door in the wall, goal on the right
-    - Agent starts on the left
-    - Lava tiles scattered across the grid
-    """
+#belief map 
 
+class BeliefMap:
+    #Stores one Bernoulli probability map per object type
+
+    def __init__(self, width: int, height: int, cfg: SensorConfig):
+        self.width = width
+        self.height = height
+        self.cfg = cfg
+        self.wall = np.full((height, width), cfg.wall_prior, dtype=np.float32)
+        self.key = np.full((height, width), cfg.key_prior, dtype=np.float32)
+        self.door = np.full((height, width), cfg.door_prior, dtype=np.float32)
+        self.goal = np.full((height, width), cfg.goal_prior, dtype=np.float32)
+        self.maps = {
+            "wall": self.wall,
+            "key": self.key,
+            "door": self.door,
+            "goal": self.goal,
+        }
+
+    def bayes_update(self, prior: float, seen: int) -> float:
+        prior = max(1e-6, min(1.0 - 1e-6, float(prior)))
+        tpr = self.cfg.tpr
+        tnr = self.cfg.tnr
+
+        if seen == 1:
+            num = tpr * prior
+            den = tpr * prior + (1.0 - tnr) * (1.0 - prior)
+        else:
+            num = (1.0 - tpr) * prior #we can change tpr over time 
+            den = (1.0 - tpr) * prior + tnr * (1.0 - prior)
+
+        return float(num / (den + 1e-8))
+
+    def renormalize_cell(self, x: int, y: int) -> None:
+        total = (
+            self.wall[y, x]
+            + self.key[y, x]
+            + self.door[y, x]
+            + self.goal[y, x]
+        )
+        if total > 1.0:
+            for grid in self.maps.values():
+                grid[y, x] /= total
+
+    def update_cell(self, x: int, y: int, label: str) -> None:
+        for name, grid in self.maps.items():
+            if label == name:
+                seen = 1
+            else:
+                seen = 0
+            grid[y, x] = self.bayes_update(grid[y, x], seen)
+            if name != label:
+                grid[y, x] *= 0.1
+
+        self.renormalize_cell(x, y)
+
+    def apply_decay(self, observed_mask: np.ndarray) -> None: #add various levels, more forgetting 
+        alpha = self.cfg.decay
+        if alpha <= 0:
+            return
+        for grid in self.maps.values():
+            grid[~observed_mask] *= (1.0 - alpha)
+
+    def set_border_walls(self) -> None:
+        border_values = {"wall": 1.0, "key": 0.0, "door": 0.0, "goal": 0.0}
+        for name, grid in self.maps.items():
+            grid[0, :]  = border_values[name]
+            grid[-1, :] = border_values[name]
+            grid[:, 0]  = border_values[name]
+            grid[:, -1] = border_values[name]
+
+    def stack(self) -> np.ndarray:
+        return np.stack(
+            [self.wall, self.key, self.door, self.goal], axis=0
+        ).astype(np.float32)
+
+
+#environment 
+
+class NoisyBeliefKeyEnv(MiniGridEnv):
+    
+    #Partial obs environment with:
+    #noisy sensor labels
+    #multi-Bernoulli belief map
+    #key, door, and goal objects
     def __init__(
         self,
-        size: int = 13,
-        agent_start_pos: Tuple[int, int] | None = None,
+        size: int = 8,
+        agent_start_pos: Tuple[int, int] = (1, 1),
         agent_start_dir: int = 0,
+        agent_view_size: int = 5,
+        num_extra_walls: int = 0,
+        randomize_layout: bool = True,
         max_steps: int | None = None,
-        shaping: ShapingConfig | None = None,
-        n_lava: int = 0,
-        **kwargs,
-    ):
+        sensor_cfg: SensorConfig | None = None,
+        reward_cfg: RewardConfig | None = None,
+        **kwargs,):
+        
+        self.size = size
         self.agent_start_pos = agent_start_pos
         self.agent_start_dir = agent_start_dir
-        self.shaping = shaping or ShapingConfig()
-        self.n_lava = n_lava
+        self.num_extra_walls = num_extra_walls
+        self.randomize_layout = randomize_layout
+        if sensor_cfg is None:
+            sensor_cfg = SensorConfig()
+        if reward_cfg is None:
+            reward_cfg = RewardConfig()
+        self.sensor_cfg = sensor_cfg
+        self.reward_cfg = reward_cfg
 
-        self._picked_key  = False
-        self._opened_door = False
-
+        self.split_x = size // 2
+        #default positions (used when randomize layout is set to False, done for test trials)
+        self.door_pos = (self.split_x, size - 4)
+        self.key_pos = (max(2, self.split_x - 2), size - 4)
+        self.goal_pos = (size - 2, size - 2)
+        self.picked_key = False
+        self.opened_door = False
+        self.belief: BeliefMap | None = None
+        self.last_sensor_report = []
         mission_space = MissionSpace(mission_func=self._gen_mission)
 
         if max_steps is None:
-            max_steps = 4 * size ** 2
+            max_steps = 8 * size * size   # doubled — agent needs more time under noise
 
         super().__init__(
             mission_space=mission_space,
-            grid_size=size,
-            see_through_walls=False,
+            width=size,
+            height=size,
             max_steps=max_steps,
+            see_through_walls=False,
+            agent_view_size=agent_view_size,
             **kwargs,
         )
 
     @staticmethod
-    def _gen_mission():
-        return "Pick up the key, open the door, reach the goal."
+    def _gen_mission() -> str:
+        return "Use noisy observations to find the key, open the door, and reach the goal."
 
-    def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):
-        obs, info = super().reset(seed=seed, options=options)
-        self._picked_key  = False
-        self._opened_door = False
-        return obs, info
-
-    def _gen_grid(self, width: int, height: int):
+    def _gen_grid(self, width: int, height: int) -> None:
         self.grid = Grid(width, height)
         self.grid.wall_rect(0, 0, width, height)
 
-        # ── One vertical wall ─────────────────────────────────────────────────
-        wall_x = self._rand_int(3, width - 3)
-        for y in range(height):
-            self.grid.set(wall_x, y, Wall())
+        # Vertical barrier wall
+        for y in range(1, height - 1):
+            self.grid.set(self.split_x, y, Wall())
 
-        # ── Door ──────────────────────────────────────────────────────────────
-        door_y = self._rand_int(1, height - 1)
-        self.door_pos = (wall_x, door_y)
-        self.grid.set(wall_x, door_y, Door(COLOR_NAMES[0], is_locked=True))
+        if self.randomize_layout:
+            # Random agent start — left side only (barrier is active)
+            start_cells = [
+                (x, y)
+                for x in range(1, self.split_x)
+                for y in range(1, height - 1)
+            ]
+            si = int(self.np_random.integers(0, len(start_cells)))
+            self.agent_start_pos = start_cells[si]
 
-        # ── Key on the left ───────────────────────────────────────────────────
-        self.key_pos = self.place_obj(
-            Key(COLOR_NAMES[0]),
-            top=(1, 1),
-            size=(wall_x - 1, height - 2),
-        )
+            # Random door along barrier
+            door_y = int(self.np_random.integers(2, height - 2))
+            self.door_pos = (self.split_x, door_y)
 
-        # ── Goal on the right ─────────────────────────────────────────────────
-        self.goal_pos = self.place_obj(
-            Goal(),
-            top=(wall_x + 1, 1),
-            size=(width - wall_x - 2, height - 2),
-        )
+            # Random key on left side
+            left_cells = [
+                (x, y)
+                for x in range(1, self.split_x)
+                for y in range(1, height - 1)
+                if (x, y) != tuple(self.agent_start_pos)
+            ]
+            ki = int(self.np_random.integers(0, len(left_cells)))
+            self.key_pos = left_cells[ki]
 
-        # ── Agent on the left ─────────────────────────────────────────────────
+            # Random goal — right side only (barrier is active)
+            goal_cells = [
+                (x, y)
+                for x in range(self.split_x + 1, width - 1)
+                for y in range(1, height - 1)
+            ]
+            gi = int(self.np_random.integers(0, len(goal_cells)))
+            self.goal_pos = goal_cells[gi]
+
+        #place the door and key
+        self.grid.set(self.door_pos[0], self.door_pos[1], Door(COLOR_NAMES[0], is_locked=True))
+        self.grid.set(self.key_pos[0],  self.key_pos[1],  Key(COLOR_NAMES[0]))
+
+        self.put_obj(Goal(), *self.goal_pos)
+
+        #place agent
         if self.agent_start_pos is not None:
             self.agent_pos = self.agent_start_pos
             self.agent_dir = self.agent_start_dir
         else:
-            self.place_agent(top=(1, 1), size=(wall_x - 1, height - 2))
+            self.place_agent()
 
-        # ── Lava scattered across the whole interior ──────────────────────────
-        for _ in range(self.n_lava):
-            self.place_obj(Lava(), top=(1, 1), size=(width - 2, height - 2))
+        #extra random walls (with connectivity validation)
+        if self.num_extra_walls > 0:
+            reserved = set()
+            for x in range(width):
+                reserved.add((x, 0))
+                reserved.add((x, height - 1))
+            for y in range(height):
+                reserved.add((0, y))
+                reserved.add((width - 1, y))
+            #reserve the  barrier and door/key cells
+            for y in range(1, height - 1):
+                reserved.add((self.split_x, y))
+            reserved.add(self.door_pos)
+            reserved.add(self.key_pos)
+            reserved.add(self.goal_pos)
+            reserved.add(tuple(self.agent_pos))
 
-        # ── Guarantee critical objects are always safely approachable ─────────
-        # Clear lava from the 4 orthogonal neighbours of the key and goal,
-        # and from the cells directly flanking the door.
-        critical_cells: set = set()
-        for ox, oy in (self.key_pos, self.goal_pos):
-            for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                critical_cells.add((ox + dx, oy + dy))
-        critical_cells.add((wall_x - 1, door_y))
-        critical_cells.add((wall_x + 1, door_y))
+            free = [
+                (x, y)
+                for x in range(1, width - 1)
+                for y in range(1, height - 1)
+                if (x, y) not in reserved
+            ]
+            n_place = min(self.num_extra_walls, len(free))
 
-        for cx, cy in critical_cells:
-            if 0 < cx < width - 1 and 0 < cy < height - 1:
-                cell = self.grid.get(cx, cy)
-                if cell is not None and cell.type == "lava":
-                    self.grid.set(cx, cy, None)
+            #Retry up to 10 times until a connected layout is found
+            placed: List[Tuple[int, int]] = []
+            for _ in range(10):
+                indices = self.np_random.choice(len(free), size=n_place, replace=False)
+                placed = [free[int(i)] for i in indices]
+                for wx, wy in placed:
+                    self.grid.set(wx, wy, Wall())
+                if self._check_connectivity(width, height):
+                    break
+                #remove and retry if not connected 
+                for wx, wy in placed:
+                    self.grid.set(wx, wy, None)
+                placed = []
 
         self.mission = self._gen_mission()
 
-    def step(self, action: int):
-        def manhattan_distance(a, b):
-            return abs(a[0] - b[0]) + abs(a[1] - b[1])
+    #checking for connectivity 
 
-        def get_target():
-            if not self._picked_key:
-                return self.key_pos
-            if not self._opened_door:
-                return self.door_pos
-            return self.goal_pos
+    def _check_connectivity(self, width: int, height: int) -> bool:
+        """
+        BFS from agent start to verify that key, door, and goal are all reachable.
+        Doors are treated as passable (the agent can open them with the key).
+        Returns True if the layout is fully connected.
+        """
+        start = tuple(self.agent_start_pos)
+        targets: Set[Tuple[int, int]] = {
+            tuple(self.key_pos),
+            tuple(self.door_pos),
+            tuple(self.goal_pos),
+        }
+        visited: Set[Tuple[int, int]] = {start}
+        queue: deque = deque([start])
+        found: Set[Tuple[int, int]] = set()
 
-        gamma_shaping = 0.99
-        k = 0.05
+        while queue:
+            x, y = queue.popleft()
+            if (x, y) in targets:
+                found.add((x, y))
+            if found == targets:
+                return True
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = x + dx, y + dy
+                npos = (nx, ny)
+                if npos in visited:
+                    continue
+                if not (0 <= nx < width and 0 <= ny < height):
+                    continue
+                cell = self.grid.get(nx, ny)
+                #able to pass through:  empty cell, key, goal, or door treated as openable
+                if cell is None or cell.type in ("key", "goal", "door"):
+                    visited.add(npos)
+                    queue.append(npos)
 
-        # ── PRE-STEP ──────────────────────────────────────────────────────────
-        pos0            = tuple(self.agent_pos)
-        phi0            = -manhattan_distance(pos0, get_target())
-        carrying_before = self.carrying
+        return found == targets
 
-        fwd0       = tuple(self.front_pos)
-        obj_ahead0 = self.grid.get(fwd0[0], fwd0[1])
+   #sensors 
+
+    def _true_label(self, x: int, y: int) -> str:
+        obj = self.grid.get(x, y)
+        if obj is None:
+            return "empty"
+        if obj.type == "wall":
+            return "wall"
+        if obj.type == "key":
+            return "key"
+        if obj.type == "door":
+            return "door"
+        if obj.type == "goal":
+            return "goal"
+        return "empty"
+
+    def _noisy_label(self, true_label: str) -> str:
+        labels = ["empty", "wall", "key", "door", "goal"]
+        # Step 1: observation dropout — corrupts cell before belief update
+        if self.sensor_cfg.noise_prob > 0.0:
+            if self.np_random.random() < self.sensor_cfg.noise_prob:
+                wrong_labels = [lab for lab in labels if lab != true_label]
+                idx = int(self.np_random.integers(0, len(wrong_labels)))
+                return wrong_labels[idx]
+        # Step 2: sensor accuracy noise
+        if self.np_random.random() < self.sensor_cfg.accuracy:
+            return true_label
+        wrong_labels = [lab for lab in labels if lab != true_label]
+        idx = int(self.np_random.integers(0, len(wrong_labels)))
+        return wrong_labels[idx]
+
+    def _get_visible_cells(self):
+        visible = []
+        ax, ay = self.agent_pos
+        radius = self.agent_view_size // 2
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                x = ax + dx
+                y = ay + dy
+                if 0 <= x < self.width and 0 <= y < self.height:
+                    visible.append((x, y))
+        return visible
+
+    def _update_belief(self) -> None:
+        assert self.belief is not None
+
+        observed_mask = np.zeros((self.height, self.width), dtype=bool)
+        sensor_report = []
+
+        for x, y in self._get_visible_cells():
+            observed_mask[y, x] = True
+
+            if (x, y) == tuple(self.agent_pos):
+                true_label = "empty"
+                noisy_label = "empty"
+            else:
+                true_label = self._true_label(x, y)
+                noisy_label = self._noisy_label(true_label)
+
+            self.belief.update_cell(x, y, noisy_label)
+            sensor_report.append(
+                {
+                    "pos": (x, y),
+                    "true_label": true_label,
+                    "noisy_label": noisy_label,
+                }
+            )
+
+        self.belief.apply_decay(observed_mask)
+        self.belief.set_border_walls()
+        self.last_sensor_report = sensor_report
+
+    def _build_info(self) -> Dict[str, Any]:
+        assert self.belief is not None
 
         door = self.grid.get(*self.door_pos)
-        was_open = door is not None and door.type == "door" and door.is_open
+        door_open = bool(door is not None and door.type == "door" and door.is_open)
+        carrying_key = bool(self.carrying is not None and self.carrying.type == "key")
 
-        ahead_is_locked_door = (
-            obj_ahead0 is not None
-            and obj_ahead0.type == "door"
-            and obj_ahead0.is_locked
-        )
-        has_key = self.carrying is not None and self.carrying.type == "key"
+        return {
+            "belief": self.belief.stack().copy(),
+            "wall_prob": self.belief.wall.copy(),
+            "key_prob": self.belief.key.copy(),
+            "door_prob": self.belief.door.copy(),
+            "goal_prob": self.belief.goal.copy(),
+            "sensor_report": list(self.last_sensor_report),
+            "agent_pos": tuple(int(v) for v in self.agent_pos),
+            "agent_dir": int(self.agent_dir),
+            "picked_key": self.picked_key,
+            "opened_door": self.opened_door,
+            "carrying_key": carrying_key,
+            "door_open": door_open,
+            "goal_pos": tuple(int(v) for v in self.goal_pos),
+            "is_success": tuple(self.agent_pos) == tuple(self.goal_pos),
+        }
 
-        shaped = float(self.shaping.step_penalty)
+    #gym api 
 
-        # ── ENV TRANSITION ────────────────────────────────────────────────────
+    def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):
+        obs, info = super().reset(seed=seed, options=options)
+
+        self.picked_key = False
+        self.opened_door = False
+
+        self.belief = BeliefMap(self.width, self.height, self.sensor_cfg)
+        self.belief.set_border_walls()
+        self._update_belief()
+
+        info = dict(info)
+        info.update(self._build_info())
+        return obs, info
+
+    def step(self, action: int):
+        pos0 = tuple(self.agent_pos)
+
+        door0 = self.grid.get(*self.door_pos)
+        was_open0 = bool(door0 is not None and door0.type == "door" and door0.is_open)
+
         obs, reward, terminated, truncated, info = super().step(action)
 
-        # ── POST-STEP ─────────────────────────────────────────────────────────
+        shaped = float(self.reward_cfg.step_penalty)
+
         pos1 = tuple(self.agent_pos)
-
         if action == self.actions.forward and pos1 == pos0:
-            shaped -= 0.05
+            shaped += self.reward_cfg.bump_penalty
 
-        door = self.grid.get(*self.door_pos)
-        is_open = door is not None and door.type == "door" and door.is_open
-        opened_this_step = (not was_open) and is_open
+        # Progress reward — full sub-goal chain: key → door → goal
+        if not self.picked_key:
+            target = self.key_pos
+        elif not self.opened_door:
+            target = self.door_pos
+        else:
+            target = self.goal_pos
 
-        # ── EVENT REWARDS ─────────────────────────────────────────────────────
-        if (not self._picked_key) and self.carrying is not None and self.carrying.type == "key":
-            self._picked_key = True
-            shaped += self.shaping.reward_pickup_key
+        dist0 = abs(pos0[0] - target[0]) + abs(pos0[1] - target[1])
+        dist1 = abs(pos1[0] - target[0]) + abs(pos1[1] - target[1])
+        shaped += self.reward_cfg.reward_progress * (dist0 - dist1)
 
-        if (not self._opened_door) and is_open:
-            self._opened_door = True
-            shaped += self.shaping.reward_open_door
+        # Key + door rewards
+        door1 = self.grid.get(*self.door_pos)
+        is_open1 = bool(door1 is not None and door1.type == "door" and door1.is_open)
 
-        if terminated and tuple(self.agent_pos) == tuple(self.goal_pos):
-            shaped += self.shaping.reward_goal
-        elif terminated:
-            shaped -= 5.0  # hit lava
+        if (not self.picked_key) and (self.carrying is not None) and (self.carrying.type == "key"):
+            self.picked_key = True
+            shaped += self.reward_cfg.reward_pickup_key
 
-        # ── POTENTIAL-BASED SHAPING ───────────────────────────────────────────
-        phi1    = -manhattan_distance(pos1, get_target())
-        shaped += k * (gamma_shaping * phi1 - phi0)
+        if (not self.opened_door) and is_open1:
+            self.opened_door = True
+            shaped += self.reward_cfg.reward_open_door
 
-        # ── DOOR BOTTLENECK SHAPING ───────────────────────────────────────────
-        if ahead_is_locked_door and has_key:
-            if action == self.actions.toggle:
-                shaped += 0.3 if opened_this_step else -0.05
-            elif action == self.actions.forward and pos1 == pos0:
-                shaped -= 0.05
+        if terminated:
+            shaped += self.reward_cfg.reward_goal
 
-        if action == self.actions.toggle and not opened_this_step and not (ahead_is_locked_door and has_key):
-            shaped -= 0.02
+        # Penalise toggle only when door is already open or no door exists
+        if action == self.actions.toggle and not (not was_open0 and is_open1):
+            shaped += self.reward_cfg.pointless_toggle_penalty
 
-        if action == self.actions.pickup and self.carrying == carrying_before:
-            shaped -= 0.05
-
-        if pos1 == pos0 and action in (self.actions.left, self.actions.right, self.actions.toggle):
-            shaped -= 0.01
+        self._update_belief()
 
         total_reward = float(reward + shaped)
 
         info = dict(info)
-        info["shaped_reward"] = shaped
-        info["picked_key"]    = self._picked_key
-        info["opened_door"]   = self._opened_door
-        info["agent_pos"]     = tuple(self.agent_pos)
-        info["goal_pos"]      = tuple(self.goal_pos)
-        info["is_success"]    = (tuple(self.agent_pos) == tuple(self.goal_pos))
+        info["base_reward"] = float(reward)
+        info["shaped_reward"] = float(shaped)
+        info["total_reward"] = total_reward
+        info.update(self._build_info())
 
         return obs, total_reward, terminated, truncated, info
-
-
+    #registration 
 def register_env():
-    if "SimpleKeyDoor-v0" not in gym.envs.registry:
-        gym.register(
-            id="SimpleKeyDoor-v0",
-            entry_point="envs.simple_keydoor_env:SimpleKeyDoorEnv",
-        )
+    gym.register(
+        id="SimpleKeyDoor-v0",
+        entry_point="envs.simple_keydoor_env:NoisyBeliefKeyEnv",
+    ) #aluete donce aluegt
+    #ka Ppolaka dot add 
+    #add a start 
