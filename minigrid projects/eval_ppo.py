@@ -36,12 +36,12 @@ class MiniGridCNN(BaseFeaturesExtractor):
         n_input_channels = observation_space.shape[0]  # C
 
         self.cnn = nn.Sequential(
-            nn.Conv2d(n_input_channels, 32, kernel_size=3, stride=1, padding=1),  # 7x7 -> 7x7
+            nn.Conv2d(n_input_channels, 32, kernel_size=3, stride=1, padding=1),#7x7 go 7x7
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),               # 7x7 -> 4x4
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1), # 7x7 go 4x4
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),               # 4x4 -> 2x2
-            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1), # 4x4 go 2x2
+            nn.ReLU(), #i love relu
             nn.Flatten(),
         )
 
@@ -108,15 +108,15 @@ def compute_kl_divergence(base_env) -> float:
 def compute_optimal_steps(base_env) -> int:
     """
     BFS lower bound for the episode.
-    Curriculum mode (no key/door): just start -> goal.
-    Full mode: start -> key -> door -> goal.
+    Curriculum mode (no key/door): just start then goal.
+    Full mode: start then key then door then goal.
     """
     g = base_env.grid
     w, h = base_env.width, base_env.height
     start = tuple(base_env.agent_start_pos)
     goal  = tuple(base_env.goal_pos)
 
-    # Check if key/door exist on the grid
+    #Check if key/door exist on the grid
     key_pos  = getattr(base_env, "key_pos",  None)
     door_pos = getattr(base_env, "door_pos", None)
 
@@ -138,7 +138,7 @@ def compute_optimal_steps(base_env) -> int:
             return None
         return d1 + d2 + d3
     else:
-        # Curriculum: direct start -> goal
+        #Curriculum: direct start then goal
         d = bfs_distance(g, start, goal, w, h, passable)
         return d
 
@@ -171,7 +171,7 @@ def main():
 
     from pathlib import Path
 
-    # Load level config: try --level first, then look inside the model's run folder
+    # Load level config: try evel first, then look inside the model's run folder
     level_cfg = {}
     level_path = args.level
     if level_path is None:
@@ -183,7 +183,7 @@ def main():
             level_cfg = json.load(f)
         print(f"Loaded level config: {level_path}")
 
-    # Load training config from the run folder (auto-detects grid_size, view_size, etc.)
+    #Load training config from the run folder (auto-detects grid_size, view_size, etc.)
     train_cfg = {}
     train_cfg_path = Path(args.model).parent / "config.json"
     if train_cfg_path.exists():
@@ -201,12 +201,12 @@ def main():
     register_env()
 
     # Always use rgb_array so MiniGrid never touches pygame from inside DummyVecEnv.
-    # We render manually via matplotlib in the main thread.
+    #We render manually via matplotlib in the main thread.
     render_mode = "rgb_array" if (args.render or args.video) else None
 
     def make_eval_env():
         from envs.simple_keydoor_env import SensorConfig
-        sensor_cfg = SensorConfig(noise_prob=noise_prob)  # match training noise
+        sensor_cfg = SensorConfig(noise_prob=noise_prob)  #match training noise
         e = gym.make(
             "SimpleKeyDoor-v0",
             render_mode=render_mode,
@@ -239,10 +239,9 @@ def main():
     ep_optimality = []
     successes = 0
 
-    # ------------------------------------------------------------------ #
-    # Render window — one figure with game frame + 4 belief heatmaps
+    # Render window, one figure with game frame + 4 belief heatmaps
     # All matplotlib calls stay in the main thread; pygame is rgb_array only.
-    # ------------------------------------------------------------------ #
+
     render_fig = None
     ax_game = None
     belief_ims = []
@@ -250,14 +249,14 @@ def main():
 
     if args.render and MATPLOTLIB_AVAILABLE:
         plt.ion()
-        # Layout: top row = game frame (spans 2 cols) | right 2 cols = wall/key
-        #         bottom row = door | goal | (empty) | (empty)
+        #Layout: top row = game frame (spans 2 cols) | right 2 cols = wall/key
+        #ottom row = door | goal | (empty) | (empty)
         render_fig = plt.figure(figsize=(14, 7))
         render_fig.suptitle("PPO Agent — Live View", fontsize=13, fontweight="bold")
 
         gs = render_fig.add_gridspec(2, 4, hspace=0.4, wspace=0.35)
 
-        # Left panel: actual game frame (2 rows tall)
+        #Left panel: actual game frame (2 rows tall)
         ax_game = render_fig.add_subplot(gs[:, :2])
         ax_game.set_title("Game (rgb_array)", fontsize=10)
         ax_game.axis("off")
@@ -341,8 +340,6 @@ def main():
         render_fig.canvas.draw_idle()
         plt.pause(args.delay)
 
-    # ------------------------------------------------------------------ #
-
     for ep in range(args.episodes):
         obs = env.reset()
         done = False
@@ -385,7 +382,7 @@ def main():
                     rgb_frame = None
                 update_render_window(env.envs[0].unwrapped, rgb_frame)
 
-        # --- Per-episode metrics ---
+        #per ep metrics
         base = env.envs[0].unwrapped
         kl = compute_kl_divergence(base)
         ep_kl.append(kl)
