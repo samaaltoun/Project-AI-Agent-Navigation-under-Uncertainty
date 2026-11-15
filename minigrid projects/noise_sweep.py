@@ -1,50 +1,41 @@
 """
-noise_sweep.py — evaluate a trained PPO model at multiple sensor-noise levels
+noise_sweep.py: evaluate a trained PPO model at multiple sensor-noise levels
 and produce a three-panel comparison plot.
 
 What it measures
-----------------
 For each noise level in --noise_levels (default: 0.0, 0.1, 0.2, 0.5, 1.0):
 
-  • success_rate   — fraction of episodes where the agent reached the goal
-  • mean_kl        — mean KL divergence (belief ‖ ground truth), averaged
+  • success_rate: fraction of episodes where the agent reached the goal
+  • mean_kl: mean KL divergence (belief ‖ ground truth), averaged
                      over every step of every episode
-  • mean_entropy   — mean belief-map entropy, averaged the same way
+  • mean_entropy: mean belief-map entropy, averaged the same way
 
 Output
-------
   <run_dir>/noise_sweep.png  — three-panel plot saved next to model.zip
 
 Usage
------
   python noise_sweep.py --model runs/2026-03-28_.../model.zip --episodes 50
   python noise_sweep.py --model ... --episodes 100 --noise_levels 0.0 0.2 0.5
 """
 
 from __future__ import annotations
-
 import argparse
 from pathlib import Path
-
 import gymnasium as gym
 import numpy as np
-
 import matplotlib
-matplotlib.use("Agg")   # save-only backend, works without a display
+matplotlib.use("Agg")   #save-only backend, works without a display
 import matplotlib.pyplot as plt
-
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
 from minigrid.wrappers import ImgObsWrapper
-
 from envs.simple_keydoor_env import register_env
 from envs.wrappers import ReducedActionSpace, SensorNoiseWrapper
 from envs.extractors import MiniGridCNN
 from envs.belief_map import BeliefMap
 
 
-# ── Environment factory ────────────────────────────────────────────────────────
-
+#env factoryy
 def _make_env(noise_prob: float, grid_size: int, n_lava: int = 0):
     e = gym.make("SimpleKeyDoor-v0", render_mode=None, size=grid_size, n_lava=n_lava)
     e = ReducedActionSpace(e)
@@ -53,9 +44,7 @@ def _make_env(noise_prob: float, grid_size: int, n_lava: int = 0):
     e = ImgObsWrapper(e)
     return e
 
-
-# ── Per-noise-level evaluation ─────────────────────────────────────────────────
-
+#per noise level eval
 def _run_level(
     model_path: str,
     grid_size: int,
@@ -67,10 +56,10 @@ def _run_level(
     Load model fresh with a 1-env at noise_prob, run n_episodes, return:
         (success_rate, mean_kl_per_step, mean_entropy_per_step)
     """
-    # Build a fresh 1-env for this noise level.
+    #Build a fresh 1-env for this noise level.
     vec_env = DummyVecEnv([lambda: _make_env(noise_prob, grid_size, n_lava)])
     vec_env = VecTransposeImage(vec_env)
-    # Load fresh — avoids n_envs mismatch from set_env (model was trained with 8 envs).
+    # Load fresh so avoids n_envs mismatch from set_env (model was trained with 8 envs).
     model = PPO.load(
         model_path,
         env=vec_env,
@@ -118,7 +107,7 @@ def _run_level(
     )
 
 
-# ── Plotting ───────────────────────────────────────────────────────────────────
+#plotting
 
 def _save_plot(
     noise_levels: list[float],
@@ -132,7 +121,7 @@ def _save_plot(
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     xs = noise_levels
 
-    # ── Panel 1: Success rate ──────────────────────────────────────────────────
+    #panel 1 for success rate
     axes[0].plot(xs, success_rates, "o-", color="steelblue", linewidth=2, markersize=7)
     for x, y in zip(xs, success_rates):
         axes[0].annotate(f"{y:.0%}", (x, y), textcoords="offset points",
@@ -144,7 +133,7 @@ def _save_plot(
     axes[0].set_xticks(xs)
     axes[0].grid(True, linewidth=0.5, alpha=0.6)
 
-    # ── Panel 2: KL divergence ─────────────────────────────────────────────────
+    #panel 2 kl diverg
     axes[1].plot(xs, mean_kls, "o-", color="coral", linewidth=2, markersize=7)
     axes[1].set_xlabel("Noise probability")
     axes[1].set_ylabel("Mean KL divergence (bits)")
@@ -153,7 +142,7 @@ def _save_plot(
     axes[1].set_xticks(xs)
     axes[1].grid(True, linewidth=0.5, alpha=0.6)
 
-    # ── Panel 3: Entropy ───────────────────────────────────────────────────────
+    #panel 3 entropy
     axes[2].plot(xs, mean_entropies, "o-", color="seagreen", linewidth=2, markersize=7)
     axes[2].set_xlabel("Noise probability")
     axes[2].set_ylabel("Mean entropy (bits)")
@@ -175,7 +164,7 @@ def _save_plot(
     print(f"\nSaved noise sweep plot to: {out_path}")
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+#main
 
 def main():
     parser = argparse.ArgumentParser(description="Noise-level sweep for PPO + BeliefMap")
