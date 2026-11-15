@@ -17,15 +17,15 @@ from minigrid.minigrid_env import MiniGridEnv
 
 @dataclass
 class SensorConfig:
-    accuracy: float = 1.0       # perfect within-window accuracy
-    noise_prob: float = 0.0     # prob of dropout per cell per step — applied inside belief update
-    tpr: float = 0.85           # prob that sensor detects something when it actually exists
-    tnr: float = 0.90           # prob sensor correctly classifies "not present"
+    accuracy: float = 1.0       #perfect withinwindow accuracy
+    noise_prob: float = 0.0     # prob of dropout per cell per step ,applied inside belief update
+    tpr: float = 0.85           #prob that sensor detects something when it actually exists
+    tnr: float = 0.90           #prob sensor correctly classifies "not present"
     wall_prior: float = 0.5
     key_prior: float = 0.05
     door_prior: float = 0.05
     goal_prior: float = 0.05
-    decay: float = 0.001        # slower forgetting — needed under heavy observation dropout
+    decay: float = 0.001        #slower forgetting, needed under heavy observation dropout
 
 
 @dataclass
@@ -36,7 +36,7 @@ class RewardConfig:
     step_penalty: float = -0.001
     bump_penalty: float = -0.05
     pointless_toggle_penalty: float = -0.5   # heavy penalty toggling uselessly must not be viable
-    reward_progress: float = 1.0             # reward per step closer to current sub-goal
+    reward_progress: float = 1.0             #reward per step closer to current subgoal
 
 
 #belief map 
@@ -115,7 +115,6 @@ class BeliefMap:
         return np.stack(
             [self.wall, self.key, self.door, self.goal], axis=0
         ).astype(np.float32)
-
 
 #environment 
 
@@ -330,7 +329,7 @@ class NoisyBeliefKeyEnv(MiniGridEnv):
 
     def _noisy_label(self, true_label: str) -> str:
         labels = ["empty", "wall", "key", "door", "goal"]
-        # Step 1: observation dropout — corrupts cell before belief update
+        # Step 1: observation dropout, corrupts cell before belief update
         if self.sensor_cfg.noise_prob > 0.0:
             if self.np_random.random() < self.sensor_cfg.noise_prob:
                 wrong_labels = [lab for lab in labels if lab != true_label]
@@ -438,7 +437,7 @@ class NoisyBeliefKeyEnv(MiniGridEnv):
         if action == self.actions.forward and pos1 == pos0:
             shaped += self.reward_cfg.bump_penalty
 
-        # Progress reward — full sub-goal chain: key → door → goal
+        # Progress reward: full sub-goal chain: key then door then goal
         if not self.picked_key:
             target = self.key_pos
         elif not self.opened_door:
@@ -485,6 +484,6 @@ def register_env():
     gym.register(
         id="SimpleKeyDoor-v0",
         entry_point="envs.simple_keydoor_env:NoisyBeliefKeyEnv",
-    ) #aluete donce aluegt
-    #ka Ppolaka dot add 
+    ) 
+    
     #add a start 
