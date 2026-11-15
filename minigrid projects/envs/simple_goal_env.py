@@ -82,7 +82,7 @@ class SimpleDoorEnv(MiniGridEnv):
         self.put_obj(Wall(), 3, 8)
 
 
-        # Agent
+        #Agent
         if self.agent_start_pos is not None:
             self.agent_pos = self.agent_start_pos
             self.agent_dir = self.agent_start_dir
@@ -115,7 +115,7 @@ class SimpleDoorEnv(MiniGridEnv):
         else:
             shaped -= 0.001
 
-        # event: reached goal
+        #event: reached goal
         if terminated:
             # MiniGrid already gives reward; we add a consistent “goal reward” if you want:
             shaped += self.shaping.reward_goal
@@ -128,7 +128,7 @@ class SimpleDoorEnv(MiniGridEnv):
         return obs, total_reward, terminated, truncated, info
 
 
-# Optional: register so gym.make() works
+#we could do: register so gym.make() works
 def register_env():
     gym.register(
         id="SimpleGoalEnv-v0",
