@@ -28,11 +28,11 @@ class MiniGridCNN(BaseFeaturesExtractor):
         n_input_channels = observation_space.shape[0]  
 
         self.cnn = nn.Sequential(
-            nn.Conv2d(n_input_channels, 32, kernel_size=3, stride=1, padding=1),  #7x7 -> 7x7
+            nn.Conv2d(n_input_channels, 32, kernel_size=3, stride=1, padding=1),#7x7 go 7x7
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),               #7x7 -> 4x4
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),     #7x7 go 4x4
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),               #4x4 -> 2x2
+            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),     #4x4 go 2x2
             nn.ReLU(),
             nn.Flatten(),)
 
@@ -59,7 +59,6 @@ class CSVLoggerCallback(BaseCallback):
 
 
     WINDOW = 100
-
     def __init__(self, log_path: Path, log_interval: int = 10_000, verbose: int = 0):
         super().__init__(verbose)
         self.log_path = log_path
@@ -67,8 +66,6 @@ class CSVLoggerCallback(BaseCallback):
         self.rows = []
         self._last_dump = time.time()
         self._last_print_step = 0
-
-        
         self._success:     list = []
         self._picked_key:  list = []
         self._opened_door: list = []
@@ -167,7 +164,7 @@ def make_env(noise_prob: float = 0.0, view_size: int = 5, grid_size: int = 15, n
     )
     env = ReducedActionSpace(env)
     env = BeliefMapObsWrapper(env)   # agent observes the full belief map, not raw pixels
-    env = FlattenObservation(env)    # flatten (9,H,W) → (9*H*W,) for MlpPolicy
+    env = FlattenObservation(env)    #flatten (9,H,W) to (9*H*W,) for MlpPolicy
     env = Monitor(env)
     return env
 
@@ -199,12 +196,12 @@ def main():
         "algo": "PPO",
         "total_timesteps": args.timesteps if args.timesteps is not None else 10_000_000,
         "seed": 42,
-        "policy": "MlpPolicy",   # flat belief map → MLP is simpler and trains faster
+        "policy": "MlpPolicy",   # flat belief map so  MLP is simpler and trains faster
         "n_steps": 4096,
         "batch_size": 256,
         "learning_rate": 3e-4,
         "gamma": 0.99,
-        "ent_coef": 0.02,          # low for Phase 3 — confident decisions under heavy noise
+        "ent_coef": 0.02,          # low for Phase 3so confident decisions under heavy noise
         "n_epochs": 10,
         "noise_prob": args.noise_prob if args.noise_prob is not None else 0.0,
         "view_size": level_cfg.get("view_size", 5),
@@ -226,11 +223,11 @@ def main():
     if args.level:
         shutil.copy(args.level, run_dir / "level.json")
 
-    # No fixed global seed — training envs see genuinely random layouts
-    # np.random.seed(config["seed"])
+    #FIXED: No fixed global seed so training envs see genuinely random layouts
+    #np.random.seed(config["seed"])
 
     n_envs = 8
-    # BeliefMapObsWrapper already outputs (C, H, W) — VecTransposeImage not needed
+    #BeliefMapObsWrapper already outputs (C, H, W) eh VecTransposeImage not needed
     env = DummyVecEnv([
         lambda: make_env(
             noise_prob=config["noise_prob"],
@@ -246,8 +243,6 @@ def main():
     # policy_kwargs = dict(
     #     features_extractor_class=MiniGridCNN,
     #     features_extractor_kwargs=dict(features_dim=128),
-    # )
-
     # Larger network — 256x256 instead of default 64x64
     # needed for 1521-feature input (9×13×13)
     policy_kwargs = dict(net_arch=[256, 256])
